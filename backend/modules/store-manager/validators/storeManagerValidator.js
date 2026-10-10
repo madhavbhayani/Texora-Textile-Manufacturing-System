@@ -3,6 +3,19 @@ const AppError = require('../../../shared/errors/AppError');
 const fail = (message) => { throw new AppError(400, 'VALIDATION_ERROR', message); };
 function id(value, label = 'ID') { if (!/^[1-9]\d*$/.test(String(value ?? ''))) fail(`${label} must be a valid ID.`); return String(value); }
 function page(query = {}) { const limit = Number(query.limit ?? 25); const offset = Number(query.offset ?? 0); if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 100000) fail('Pagination must use a limit from 1 to 100 and a nonnegative offset.'); return { limit, offset }; }
+function filters(query = {}, kind) {
+  const parsed = {};
+  if (query.from != null || query.to != null) {
+    for (const field of ['from','to']) if (query[field] != null) { const value=String(query[field]); const date=new Date(`${value}T00:00:00Z`); if (!/^\d{4}-\d{2}-\d{2}$/.test(value)||Number.isNaN(date.getTime())||date.toISOString().slice(0,10)!==value) fail(`${field} must be a valid YYYY-MM-DD date.`); parsed[field]=value; }
+    if (parsed.from && parsed.to && parsed.from > parsed.to) fail('The from date must not be after the to date.');
+  }
+  if (kind==='lots') {
+    for (const key of ['yarnTypeId','colourId','locationId','supplierId']) if(query[key]) parsed[key]=id(query[key],key);
+    if(query.status){if(!['ACTIVE','DEPLETED','QUARANTINED'].includes(query.status))fail('Stock status is invalid.');parsed.status=query.status;}
+  }
+  if (kind==='movements' && query.movementType) { if(!['RECEIPT','ISSUE','RETURN_IN','ADJUSTMENT_IN','ADJUSTMENT_OUT','TRANSFER_IN','TRANSFER_OUT'].includes(query.movementType)) fail('Movement type is invalid.'); parsed.movementType=query.movementType; }
+  return parsed;
+}
 function text(value, label, max = 200, required = true) { if (!required && (value == null || value === '')) return null; if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(`${label} is required and must be at most ${max} characters.`); return value.trim(); }
 function positive(value, label, allowZero = false) { const n = Number(value); if (!Number.isFinite(n) || (allowZero ? n < 0 : n <= 0)) fail(`${label} must be ${allowZero ? 'nonnegative' : 'positive'}.`); return n; }
 function supplier(input) {
@@ -28,16 +41,17 @@ function po(input) {
 }
 function receive(input) {
   if (!input || !Array.isArray(input.items) || !input.items.length || input.items.length > 100) fail('Receipt must contain one or more purchase order lines.');
-  return { deliveryNoteNo: text(input.deliveryNoteNo, 'Delivery note', 100, false), notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ poItemId: id(line.poItemId, 'Purchase order line'), receivedQtyKg: positive(line.receivedQtyKg, 'Received quantity'), acceptedQtyKg: positive(line.acceptedQtyKg, 'Accepted quantity', true), unitCost: positive(line.unitCost, 'Unit cost', true), lotCode: text(line.lotCode, 'Lot code', 100, false) })) };
+  return { deliveryNoteNo: text(input.deliveryNoteNo, 'Delivery note', 100, false), notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ poItemId: id(line.poItemId, 'Purchase order line'), receivedQtyKg: positive(line.receivedQtyKg, 'Received quantity'), acceptedQtyKg: positive(line.acceptedQtyKg, 'Accepted quantity', true), unitCost: positive(line.unitCost, 'Unit cost', true) })) };
 }
 function invoice(input) {
   if (!input || !Array.isArray(input.items) || !input.items.length || input.items.length > 100) fail('Invoice must include one or more received items.');
-  return { goodsReceiptId: id(input.goodsReceiptId, 'Goods receipt'), invoiceNo: text(input.invoiceNo, 'Supplier invoice number', 100), invoiceDate: input.invoiceDate || null, dueDate: input.dueDate || null, notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ goodsReceiptItemId: id(line.goodsReceiptItemId, 'Receipt item'), quantityKg: positive(line.quantityKg, 'Billed quantity'), unitRate: positive(line.unitRate, 'Unit rate', true), taxPercent: line.taxPercent == null ? 5 : Number(line.taxPercent) })) };
+  return { purchaseOrderId: id(input.purchaseOrderId, 'Purchase order'), goodsReceiptId: id(input.goodsReceiptId, 'Goods receipt'), invoiceDate: input.invoiceDate || null, dueDate: input.dueDate || null, notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ goodsReceiptItemId: id(line.goodsReceiptItemId, 'Receipt item'), quantityKg: positive(line.quantityKg, 'Billed quantity') })) };
 }
 function payment(input) {
   const methods = ['BANK_TRANSFER', 'UPI', 'CHEQUE', 'CASH', 'OTHER'];
   if (!input || !methods.includes(input.paymentMethod)) fail('Choose a valid payment method.');
-  return { supplierInvoiceId: id(input.supplierInvoiceId, 'Invoice'), amount: positive(input.amount, 'Payment amount'), paymentMethod: input.paymentMethod, paymentDate: input.paymentDate || null, paymentReference: text(input.paymentReference, 'Payment reference', 120, false), notes: text(input.notes, 'Notes', 1000, false) };
+  const payOutstanding = input.payOutstanding === true;
+  return { supplierInvoiceId: id(input.supplierInvoiceId, 'Invoice'), amount: payOutstanding ? null : positive(input.amount, 'Payment amount'), payOutstanding, paymentMethod: input.paymentMethod, paymentDate: input.paymentDate || null, paymentReference: text(input.paymentReference, 'Payment reference', 120, false), notes: text(input.notes, 'Notes', 1000, false) };
 }
 function handoff(input) {
   if (!input || typeof input !== 'object') fail('Handoff details are required.');
@@ -45,4 +59,4 @@ function handoff(input) {
   if (!['SPINNING', 'WEAVING', 'DYEING'].includes(stage)) fail('Choose a valid production stage.');
   return { orderItemId: id(input.orderItemId, 'Order item'), supervisorUserId: id(input.supervisorUserId, 'Supervisor'), plannedMeters: positive(input.plannedMeters, 'Planned metres'), stage, notes: text(input.notes, 'Notes', 1000, false) };
 }
-module.exports = { id, page, text, positive, supplier, po, receive, invoice, payment, handoff };
+module.exports = { id, page, filters, text, positive, supplier, po, receive, invoice, payment, handoff };

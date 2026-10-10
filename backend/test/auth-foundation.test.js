@@ -24,6 +24,8 @@ describe('buyer request validation', () => {
     assert.throws(() => validateSignup({ ...required, phone: '123' }), { code: 'VALIDATION_ERROR' });
     assert.throws(() => validateSignup({ ...required, confirmPassword: 'different' }), { code: 'VALIDATION_ERROR' });
     assert.deepEqual(validateLogin({ email: ' Buyer@Example.com ', password: 'pass' }), { email: 'buyer@example.com', password: 'pass' });
+    assert.deepEqual(validateLogin({ email: ' +91 98765 43210 ', password: 'pass' }), { email: '+919876543210', password: 'pass' });
+    assert.throws(() => validateLogin({ email: 'not-a-phone', password: 'pass' }), { code: 'VALIDATION_ERROR' });
   });
 });
 

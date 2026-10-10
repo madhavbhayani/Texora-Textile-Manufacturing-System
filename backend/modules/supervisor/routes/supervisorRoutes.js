@@ -1,0 +1,17 @@
+'use strict';
+const express=require('express');
+const authenticate=require('../../auth/middleware/authenticate');
+const authorize=require('../../auth/middleware/authorize');
+const c=require('../controllers/supervisorController');
+const router=express.Router();
+router.use(authenticate,authorize('SUPERVISOR','OWNER'));
+router.get('/dashboard',c.dashboard);
+router.get('/handoffs',c.handoffs);router.get('/handoffs/:id',c.handoff);router.post('/handoffs/:id/accept',c.accept);router.post('/handoffs/:id/reject',c.reject);router.post('/handoffs/:id/hold',c.hold);router.post('/handoffs/:id/create-job',c.createJob);
+router.get('/jobs',c.jobs);router.get('/jobs/:id/logs',c.logs);router.get('/jobs/:id',c.job);router.post('/jobs/:id/assign-machine',c.assignMachine);
+router.get('/workers',c.workers);router.post('/workers',c.createWorker);router.patch('/workers/:id/shift',c.updateWorkerShift);router.get('/shifts',c.shifts);router.post('/machine-assignments/:id/workers',c.assignWorker);router.post('/worker-assignments/:id/unassign',c.unassignWorker);
+router.get('/machines',c.machines);router.post('/machines',c.createMachine);router.get('/machines/:id/status-history',c.machineHistory);router.post('/machines/:id/status-events',c.statusEvent);router.get('/machines/:id',c.machine);router.get('/breakdowns',c.breakdowns);
+router.get('/rolls',c.rolls);router.post('/rolls',c.registerRoll);
+router.get('/quality/pending',c.pendingQuality);router.get('/quality/defect-types',c.defectTypes);router.get('/quality/rolls/:id',c.rollDetail);router.post('/quality/rolls/:id/inspect',c.inspect);router.get('/quality/inspections',c.inspections);router.get('/quality/inspections/:id',c.inspection);
+router.get('/rework',c.rework);router.get('/rejected',c.rejected);
+router.get('/reports/production',c.productionReport);router.get('/reports/quality',c.qualityReport);router.get('/reports/machines',c.machineReport);router.get('/reports/workers',c.workerReport);
+module.exports=router;

@@ -43,8 +43,10 @@ function validateSignup(body) {
 }
 function validateLogin(body) {
   bodyObject(body);
-  const email = validateEmail(body.email);
-  if (typeof body.password !== 'string' || !body.password || Buffer.byteLength(body.password, 'utf8') > 72) throw new AppError(400, 'VALIDATION_ERROR', 'Email and password are required.');
-  return { email, password: body.password };
+  const identifier = typeof body.email === 'string' ? body.email.trim() : '';
+  if (!identifier) throw new AppError(400, 'VALIDATION_ERROR', 'Email or phone number and password are required.');
+  const loginIdentifier = identifier.includes('@') ? validateEmail(identifier) : normalizePhone(identifier, true);
+  if (typeof body.password !== 'string' || !body.password || Buffer.byteLength(body.password, 'utf8') > 72) throw new AppError(400, 'VALIDATION_ERROR', 'Email or phone number and password are required.');
+  return { email: loginIdentifier, password: body.password };
 }
 module.exports = { validateSignup, validateLogin, validateEmail, normalizePhone };

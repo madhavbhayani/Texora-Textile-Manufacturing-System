@@ -68,10 +68,11 @@ async function login(input, req) {
               b.company_name, b.is_active AS buyer_active
        FROM auth.users u JOIN auth.roles r ON r.role_id = u.role_id
        LEFT JOIN master.buyers b ON b.user_id = u.user_id
-       WHERE lower(u.email) = $1 FOR UPDATE OF u`, [input.email],
+       WHERE lower(u.email) = $1 OR u.phone = $1 FOR UPDATE OF u`, [input.email],
     );
     user = result.rows[0];
-    const isEligibleRole = Boolean(user && user.role_active && (user.role_code !== 'BUYER' || user.buyer_active));
+    const rolesAllowedToSignIn = ['BUYER','OWNER','STORE_MANAGER','SUPERVISOR','WORKER','DISPATCH_OFFICER'];
+    const isEligibleRole = Boolean(user && user.role_active && rolesAllowedToSignIn.includes(user.role_code) && (user.role_code !== 'BUYER' || user.buyer_active));
     if (user?.locked_until && new Date(user.locked_until) > new Date()) {
       await bcrypt.compare(input.password, await dummyHashPromise);
       await recordLogin(client, { userId: user.user_id, email: input.email, success: false, failureReason: 'ACCOUNT_LOCKED', req });

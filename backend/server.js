@@ -15,6 +15,7 @@ function createApp(origins) {
   const productRoutes = require('./modules/orders/routes/productRoutes');
   const orderRoutes = require('./modules/orders/routes/orderRoutes');
   const storeManagerRoutes = require('./modules/store-manager/routes/storeManagerRoutes');
+  const supervisorRoutes = require('./modules/supervisor/routes/supervisorRoutes');
   const notFound = require('./shared/middleware/notFound');
   const errorHandler = require('./shared/middleware/errorHandler');
   const { pool } = require('./database/config/db');
@@ -33,11 +34,17 @@ function createApp(origins) {
   app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '20kb', strict: true }));
   app.use(cookieParser());
 
-  const authLimiter = rateLimit({
+  const loginLimiter = rateLimit({
     windowMs: Number(process.env.AUTH_RATE_WINDOW_MS || 15 * 60 * 1000),
     limit: Number(process.env.AUTH_RATE_LIMIT || 20),
     standardHeaders: 'draft-8', legacyHeaders: false,
-    message: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many authentication attempts. Please try again later.' } },
+    message: { success: false, error: { code: 'RATE_LIMITED', message: 'Sign-in is temporarily unavailable. Please wait a few minutes and try again.' } },
+  });
+  const sessionLimiter = rateLimit({
+    windowMs: Number(process.env.AUTH_RATE_WINDOW_MS || 15 * 60 * 1000),
+    limit: Number(process.env.AUTH_RATE_LIMIT || 20),
+    standardHeaders: 'draft-8', legacyHeaders: false,
+    message: { success: false, error: { code: 'RATE_LIMITED', message: 'This session action is temporarily unavailable. Please try again shortly.' } },
   });
   app.get('/api/health', async (req, res) => {
     try {
@@ -47,14 +54,17 @@ function createApp(origins) {
       res.status(503).json({ success: false, error: { code: 'DATABASE_UNAVAILABLE', message: 'The service is temporarily unavailable.' } });
     }
   });
-  app.use('/api/buyers/signup', authLimiter);
-  app.use('/api/buyers/login', authLimiter);
-  app.use('/api/auth', authLimiter);
+  app.use('/api/buyers/signup', loginLimiter);
+  app.use('/api/buyers/login', loginLimiter);
+  app.use('/api/auth/refresh', sessionLimiter);
+  app.use('/api/auth/logout', sessionLimiter);
+  app.use('/api/auth/change-password', sessionLimiter);
   app.use('/api/buyers', buyerRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/products', productRoutes);
   app.use('/api/orders', orderRoutes);
   app.use('/api/store-manager', storeManagerRoutes);
+  app.use('/api/supervisor', supervisorRoutes);
   app.use(notFound);
   app.use(errorHandler);
   return app;

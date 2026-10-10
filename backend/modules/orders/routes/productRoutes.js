@@ -1,0 +1,22 @@
+'use strict';
+const express = require('express');
+const authenticate = require('../../auth/middleware/authenticate');
+const authorize = require('../../auth/middleware/authorize');
+const controller = require('../controllers/productController');
+const router = express.Router();
+
+router.get('/', controller.list);
+router.get('/colours', authenticate, authorize('OWNER'), controller.colours);
+router.get('/yarns', authenticate, authorize('OWNER'), controller.yarns);
+router.get('/attribute-definitions', authenticate, authorize('OWNER'), controller.attributes);
+router.get('/owner', authenticate, authorize('OWNER'), controller.ownerList);
+router.get('/owner/:productId', authenticate, authorize('OWNER'), controller.ownerDetail);
+router.get('/:productId', controller.detail);
+router.post('/', authenticate, authorize('OWNER'), controller.create);
+router.patch('/:productId', authenticate, authorize('OWNER'), controller.update);
+router.patch('/:productId/publish', authenticate, authorize('OWNER'), controller.publish);
+router.patch('/:productId/archive', authenticate, authorize('OWNER'), controller.archive);
+router.put('/:productId/colours', authenticate, authorize('OWNER'), controller.colours);
+router.put('/:productId/bom', authenticate, authorize('OWNER'), controller.bom);
+router.put('/:productId/attributes', authenticate, authorize('OWNER'), controller.attributes);
+module.exports = router;

@@ -15,6 +15,7 @@ router.get('/goods-receipts', storeRole, c.receipts); router.get('/goods-receipt
 router.get('/supplier-invoices', storeRole, c.invoices); router.get('/supplier-invoices/:id', storeRole, c.invoiceDetail); router.post('/supplier-invoices', storeRole, c.createInvoice);
 router.get('/supplier-payments', storeRole, c.payments); router.post('/supplier-payments', storeRole, c.createPayment); router.post('/supplier-payments/:id/complete', storeRole, c.completePayment);
 router.get('/supervisor-handoffs/orders', storeRole, c.handoffOrders); router.get('/supervisor-handoffs', authorize('STORE_MANAGER', 'OWNER', 'SUPERVISOR'), c.handoffs); router.post('/supervisor-handoffs', storeRole, c.createHandoff); router.get('/supervisor-handoffs/:id', authorize('STORE_MANAGER', 'OWNER', 'SUPERVISOR'), c.handoff); router.post('/supervisor-handoffs/:id/issue-materials', storeRole, c.issueMaterials);
+router.get('/rework-material-requests', storeRole, c.replacementRequests); router.post('/rework-material-requests/:id/approve', storeRole, c.approveReplacementRequest);
 router.post('/supervisor-handoffs/:id/accept', authorize('SUPERVISOR', 'OWNER'), c.acceptHandoff);
 router.post('/supervisor-handoffs/:id/hold', authorize('SUPERVISOR', 'OWNER'), c.holdHandoff);
 router.post('/supervisor-handoffs/:id/reject', authorize('SUPERVISOR', 'OWNER'), c.rejectHandoff);

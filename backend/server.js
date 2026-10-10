@@ -1,6 +1,7 @@
 'use strict';
 
-require('dotenv').config();
+// Resolve the backend-local environment file independently of the shell's cwd.
+require('dotenv').config({ path: require('node:path').join(__dirname, '.env') });
 const http = require('node:http');
 const { validateEnvironment, corsError } = require('./config/env');
 
@@ -78,10 +79,20 @@ function createApp(origins) {
 
 async function startServer() {
   let closePool;
+  let closeMailer;
   let server;
   try {
     console.info('[Texora] Starting application...');
     const { origins, port } = validateEnvironment();
+    const mailer = require('./shared/email/mailer');
+    closeMailer = mailer.closeMailer;
+    const mailStatus = await mailer.initializeMailer();
+    if (mailStatus.connected) console.info('[Email] SMTP connection ready.');
+    else if (mailStatus.configured) console.warn('[Email] SMTP verification failed; worker account email may be unavailable.');
+    else {
+      const missing = [!process.env.GMAIL?.trim() && 'GMAIL', !process.env.APP_PASSWORD?.trim() && 'APP_PASSWORD'].filter(Boolean);
+      console.warn(`[Email] SMTP configuration is incomplete${missing.length ? `; missing ${missing.join(', ')}` : '; check that GMAIL is a valid email address'}. Worker account email is unavailable.`);
+    }
     const database = require('./database/config/db');
     closePool = database.closePool;
     console.info('[Database] Connecting to PostgreSQL...');
@@ -105,6 +116,7 @@ async function startServer() {
       console.info(`[Server] ${signal} received; shutting down.`);
       server.close(async (error) => {
         if (error) console.error('[Server] HTTP shutdown error:', error.code || 'UNKNOWN');
+        closeMailer?.();
         try { await closePool(); console.info('[Database] Connection pool closed.'); }
         catch (closeError) { console.error('[Database] Pool shutdown error:', closeError.code || 'UNKNOWN'); process.exitCode = 1; }
       });
@@ -116,6 +128,7 @@ async function startServer() {
   } catch (error) {
     console.error('[Texora] Startup failed:', error.migrationName ? `${error.migrationName}: ${error.message}` : error.message);
     if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    closeMailer?.();
     if (closePool) await closePool().catch((closeError) => console.error('[Database] Pool close failed:', closeError.code || 'UNKNOWN'));
     throw error;
   }

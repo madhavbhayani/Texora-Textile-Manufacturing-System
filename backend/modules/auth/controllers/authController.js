@@ -21,8 +21,10 @@ function setCredentials(res, session, accessToken) {
   return { accessToken, csrfToken };
 }
 function csrf(req, res) {
-  const csrfToken = require('node:crypto').randomBytes(32).toString('base64url');
-  res.cookie('texora_csrf', csrfToken, csrfCookieOptions());
+  // Keep an existing double-submit token stable. Rotating it on every GET can
+  // invalidate another tab/request that is currently preparing /refresh.
+  const csrfToken = req.cookies?.texora_csrf || require('node:crypto').randomBytes(32).toString('base64url');
+  if (!req.cookies?.texora_csrf) res.cookie('texora_csrf', csrfToken, csrfCookieOptions());
   res.json({ success: true, data: { csrfToken } });
 }
 function clearCredentials(res) {

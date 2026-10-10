@@ -13,7 +13,7 @@ const columns=[
  {label:'Line total',width:92,value:line=>money(line.line_total)},
 ];
 const x0=36,rowHeight=19;
-function text(commands,x,y,value,size=8,bold=false){commands.push('BT',`/${bold?'F2':'F1'} ${size} Tf`,`1 0 0 1 ${x} ${y} Tm`,`(${safe(value)}) Tj`,'ET');}
+function text(commands,x,y,value,size=8,bold=false){commands.push('0 g 0 G','BT',`/${bold?'F2':'F1'} ${size} Tf`,`1 0 0 1 ${x} ${y} Tm`,`(${safe(value)}) Tj`,'ET');}
 function line(commands,x1,y1,x2,y2){commands.push('0.78 G 0.6 w',`${x1} ${y1} m ${x2} ${y2} l S`,'0 G');}
 function table(commands,rows,top){
  const width=columns.reduce((sum,column)=>sum+column.width,0);let x=x0;const headerBottom=top-rowHeight;

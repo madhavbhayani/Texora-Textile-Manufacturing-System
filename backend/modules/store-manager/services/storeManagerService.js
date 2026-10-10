@@ -82,7 +82,8 @@ async function updateYarn(id, input = {}) {
 }
 async function suppliers(query = {}, { limit, offset }) {
   const search = String(query.search || '').slice(0,100);
-  return (await pool.query(`SELECT supplier_id,supplier_code,supplier_name,contact_person,phone,email,gst_no,address_line,city,state,pincode,payment_terms_days,is_active FROM master.suppliers WHERE ($1='' OR supplier_name ILIKE $2 OR supplier_code ILIKE $2 OR COALESCE(contact_person,'') ILIKE $2) ORDER BY supplier_name LIMIT $3 OFFSET $4`,[search,`%${search}%`,limit,offset])).rows;
+  const activeOnly = query.activeOnly === 'true';
+  return (await pool.query(`SELECT supplier_id,supplier_code,supplier_name,contact_person,phone,email,gst_no,address_line,city,state,pincode,payment_terms_days,is_active FROM master.suppliers WHERE ($1='' OR supplier_name ILIKE $2 OR supplier_code ILIKE $2 OR COALESCE(contact_person,'') ILIKE $2) AND (NOT $3::boolean OR is_active) ORDER BY supplier_name LIMIT $4 OFFSET $5`,[search,`%${search}%`,activeOnly,limit,offset])).rows;
 }
 async function getSupplier(id) { const result=await pool.query('SELECT * FROM master.suppliers WHERE supplier_id=$1',[id]); if(!result.rowCount) notFound('Supplier'); return result.rows[0]; }
 async function createSupplier(actorId, s) { try { return (await pool.query(`INSERT INTO master.suppliers(supplier_name,contact_person,phone,email,gst_no,address_line,city,state,pincode,payment_terms_days,is_active,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,[s.supplierName,s.contactPerson,s.phone,s.email,s.gstNo,s.addressLine,s.city,s.state,s.pincode,s.paymentTermsDays,s.isActive,actorId])).rows[0]; } catch(e) { dbError(e,'Supplier'); } }
@@ -150,6 +151,7 @@ async function purchaseOrderShortages(orderId) {
 }
 async function purchaseOrder(id) { const header=await pool.query(`SELECT po.*,s.supplier_name,o.order_no FROM procurement.purchase_orders po JOIN master.suppliers s USING(supplier_id) LEFT JOIN sales.orders o ON o.order_id=po.linked_order_id WHERE po.purchase_order_id=$1`,[id]); if(!header.rowCount) notFound('Purchase order'); const items=await pool.query(`SELECT poi.*,yt.yarn_code,yt.yarn_name,c.colour_name,COALESCE((SELECT SUM(gri.received_qty_kg) FROM procurement.goods_receipt_items gri WHERE gri.po_item_id=poi.po_item_id),0) AS received_qty_kg FROM procurement.purchase_order_items poi JOIN master.yarn_types yt USING(yarn_type_id) LEFT JOIN master.colours c USING(colour_id) WHERE poi.purchase_order_id=$1 ORDER BY poi.line_no`,[id]); return {...header.rows[0],items:items.rows}; }
 async function savePo(actorId,p,poId=null) { return transaction(async(client)=>{ let head;
+  const supplier=await client.query('SELECT supplier_id FROM master.suppliers WHERE supplier_id=$1 AND is_active FOR UPDATE',[p.supplierId]); if(!supplier.rowCount)throw new AppError(400,'INVALID_SUPPLIER','Choose an active supplier for this purchase order.');
   if(poId){ const old=await client.query(`SELECT * FROM procurement.purchase_orders WHERE purchase_order_id=$1 FOR UPDATE`,[poId]); if(!old.rowCount) notFound('Purchase order'); if(old.rows[0].status!=='DRAFT') throw new AppError(409,'PO_NOT_EDITABLE','Only draft purchase orders can be edited.'); head=await client.query(`UPDATE procurement.purchase_orders SET supplier_id=$2,purchase_type=$3,linked_order_id=$4,expected_date=$5,notes=$6 WHERE purchase_order_id=$1 RETURNING purchase_order_id`,[poId,p.supplierId,p.purchaseType,p.linkedOrderId,p.expectedDate,p.notes]); await client.query('DELETE FROM procurement.purchase_order_items WHERE purchase_order_id=$1',[poId]); }
   else { if(p.purchaseType==='ORDER_SPECIFIC'){ const o=await client.query(`SELECT order_id FROM sales.orders WHERE order_id=$1 AND status IN ('PLACED','CONFIRMED','AWAITING_MATERIAL')`,[p.linkedOrderId]); if(!o.rowCount) throw new AppError(400,'ORDER_NOT_ELIGIBLE','Select an order eligible for material planning.'); }
     head=await client.query(`INSERT INTO procurement.purchase_orders(supplier_id,purchase_type,linked_order_id,expected_date,created_by,notes) VALUES($1,$2,$3,$4,$5,$6) RETURNING purchase_order_id`,[p.supplierId,p.purchaseType,p.linkedOrderId,p.expectedDate,actorId,p.notes]); }
@@ -179,9 +181,23 @@ async function createInvoice(actor,input) {
     const purchaseOrderId=receipt.rows[0].purchase_order_id;
     if(String(input.purchaseOrderId)!==String(purchaseOrderId))throw new AppError(400,'PO_RECEIPT_MISMATCH','Select a receipt belonging to the purchase order.');
 
+    // Recover a pending correction when a client omitted its invoice ID. The
+    // receipt has a unique invoice constraint, so resubmission must update it.
+    let correctionInvoiceId=input.correctionInvoiceId;
+    if(!correctionInvoiceId){
+      const pending=await client.query(`SELECT si.supplier_invoice_id FROM procurement.supplier_invoices si
+        WHERE si.goods_receipt_id=$1 AND si.status='RECORDED'
+          AND (SELECT r.decision FROM procurement.supplier_invoice_reviews r WHERE r.supplier_invoice_id=si.supplier_invoice_id ORDER BY r.created_at DESC,r.review_id DESC LIMIT 1)='CORRECTION_REQUESTED'
+        FOR UPDATE OF si`,[input.goodsReceiptId]);
+      if(pending.rowCount)correctionInvoiceId=pending.rows[0].supplier_invoice_id;
+      else {
+        const existing=await client.query(`SELECT internal_invoice_no FROM procurement.supplier_invoices WHERE goods_receipt_id=$1`,[input.goodsReceiptId]);
+        if(existing.rowCount)throw new AppError(409,'INVOICE_ALREADY_EXISTS',`Invoice ${existing.rows[0].internal_invoice_no} already exists for this receipt. Refresh the invoice list and continue its correction if requested.`);
+      }
+    }
     let invoice;
-    if(input.correctionInvoiceId){
-      const existing=await client.query(`SELECT si.supplier_invoice_id,si.internal_invoice_no,si.status,si.goods_receipt_id,si.purchase_order_id,(SELECT r.decision FROM procurement.supplier_invoice_reviews r WHERE r.supplier_invoice_id=si.supplier_invoice_id ORDER BY r.created_at DESC,r.review_id DESC LIMIT 1) latest_decision FROM procurement.supplier_invoices si WHERE si.supplier_invoice_id=$1 FOR UPDATE`,[input.correctionInvoiceId]);
+    if(correctionInvoiceId){
+      const existing=await client.query(`SELECT si.supplier_invoice_id,si.internal_invoice_no,si.status,si.goods_receipt_id,si.purchase_order_id,(SELECT r.decision FROM procurement.supplier_invoice_reviews r WHERE r.supplier_invoice_id=si.supplier_invoice_id ORDER BY r.created_at DESC,r.review_id DESC LIMIT 1) latest_decision FROM procurement.supplier_invoices si WHERE si.supplier_invoice_id=$1 FOR UPDATE`,[correctionInvoiceId]);
       if(!existing.rowCount)notFound('Supplier invoice');
       const current=existing.rows[0];
       if(current.status!=='RECORDED'||current.latest_decision!=='CORRECTION_REQUESTED')throw new AppError(409,'CORRECTION_NOT_PENDING','This invoice is no longer awaiting correction. Refresh and try again.');
@@ -199,9 +215,9 @@ async function createInvoice(actor,input) {
       if(!valid.rowCount||Number(valid.rows[0].billed)+item.quantityKg>Number(valid.rows[0].accepted_qty_kg))throw new AppError(400,'INVALID_INVOICE_LINE','Invoice quantities must refer to unbilled accepted quantities from this receipt.');
       await client.query(`INSERT INTO procurement.supplier_invoice_items(supplier_invoice_id,goods_receipt_item_id,billed_qty_kg,unit_rate,tax_percent) VALUES($1,$2,$3,$4,$5)`,[invoice.supplier_invoice_id,item.goodsReceiptItemId,item.quantityKg,valid.rows[0].unit_rate,valid.rows[0].tax_percent]);
     }
-    if(input.correctionInvoiceId)await client.query(`INSERT INTO procurement.supplier_invoice_reviews(supplier_invoice_id,decision,reason,actor_user_id) VALUES($1,'CORRECTION_SUBMITTED',$2,$3)`,[invoice.supplier_invoice_id,input.notes||'Corrected invoice details resubmitted.',actor]);
+    if(correctionInvoiceId)await client.query(`INSERT INTO procurement.supplier_invoice_reviews(supplier_invoice_id,decision,reason,actor_user_id) VALUES($1,'CORRECTION_SUBMITTED',$2,$3)`,[invoice.supplier_invoice_id,input.notes||'Corrected invoice details resubmitted.',actor]);
     const total=await client.query('SELECT COALESCE(SUM(line_total),0) invoice_total FROM procurement.supplier_invoice_items WHERE supplier_invoice_id=$1',[invoice.supplier_invoice_id]);
-    return {...invoice,purchase_order_id:purchaseOrderId,invoice_total:total.rows[0].invoice_total,correction_resubmitted:Boolean(input.correctionInvoiceId)};
+    return {...invoice,purchase_order_id:purchaseOrderId,invoice_total:total.rows[0].invoice_total,correction_resubmitted:Boolean(correctionInvoiceId)};
   });
 }
 async function payments({limit,offset}) { return (await pool.query(`SELECT p.supplier_payment_id,p.payment_no,p.supplier_invoice_id,p.amount,p.payment_date,p.payment_method,p.payment_reference,p.status,p.notes,si.internal_invoice_no,si.supplier_invoice_no,s.supplier_name,u.full_name AS recorded_by FROM procurement.supplier_payments p JOIN procurement.supplier_invoices si USING(supplier_invoice_id) JOIN master.suppliers s USING(supplier_id) JOIN auth.users u ON u.user_id=p.recorded_by ORDER BY p.payment_date DESC,p.supplier_payment_id DESC LIMIT $1 OFFSET $2`,[limit,offset])).rows; }
@@ -245,4 +261,61 @@ async function issueHandoffMaterials(actor,id) {
   });
 }
 
-module.exports = { dashboard,inventorySummary,lots,movements,lowStock,yarnTypes,colours,createYarn,updateYarn,suppliers,getSupplier,createSupplier,updateSupplier,purchaseOrders,purchaseOrder,purchaseOrderCustomerOrders,purchaseOrderShortages,createPurchaseOrder,updatePurchaseOrder,issuePurchaseOrder,cancelPurchaseOrder,receivePurchaseOrder,goodsReceipts,goodsReceipt,invoices,invoiceWorkflowDetail,createInvoice,payments,createPayment,completePayment,supervisors,customerOrdersForHandoff,handoffs,handoff,createHandoff,respondHandoff,createHandoffJob,issueHandoffMaterials };
+async function replacementMaterialRequests(query={}) {
+  const limit=Math.min(Math.max(Number(query.limit)||50,1),100),offset=Math.max(Number(query.offset)||0,0);
+  return (await pool.query(`SELECT q.replacement_request_id,q.request_no,q.job_id,j.job_no,q.rejected_roll_id,r.roll_no,r.length_meters,
+      q.status,q.requested_at,q.approved_at,u.full_name AS requested_by_name,o.order_no,ft.fabric_name,c.colour_name,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('yarn_type_id',i.yarn_type_id,'yarn_name',yt.yarn_name,'required_kg',i.required_kg,
+        'available_kg',GREATEST(COALESCE((SELECT sum(yl.on_hand_qty_kg) FROM inventory.yarn_lots yl WHERE yl.yarn_type_id=i.yarn_type_id AND yl.status='ACTIVE' AND (yl.colour_id IS NULL OR yl.colour_id=oi.colour_id)),0)
+          -COALESCE((SELECT sum(yr.quantity_kg) FROM inventory.yarn_reservations yr WHERE yr.yarn_type_id=i.yarn_type_id AND yr.status='ACTIVE' AND yr.order_item_id<>oi.order_item_id),0),0)) ORDER BY yt.yarn_name)
+        FROM production.replacement_material_request_items i JOIN master.yarn_types yt USING(yarn_type_id)
+        WHERE i.replacement_request_id=q.replacement_request_id),'[]'::jsonb) AS materials,
+      mi.issue_no
+    FROM production.replacement_material_requests q JOIN production.jobs j USING(job_id)
+    JOIN production.rolls r ON r.roll_id=q.rejected_roll_id
+    JOIN sales.order_items oi ON oi.order_item_id=j.order_item_id JOIN sales.orders o USING(order_id)
+    JOIN master.fabric_types ft USING(fabric_type_id) LEFT JOIN master.colours c USING(colour_id)
+    JOIN auth.users u ON u.user_id=q.requested_by LEFT JOIN inventory.material_issues mi ON mi.material_issue_id=q.material_issue_id
+    ORDER BY CASE q.status WHEN 'PENDING' THEN 0 WHEN 'ISSUED' THEN 1 ELSE 2 END,q.requested_at DESC
+    LIMIT $1 OFFSET $2`,[limit,offset])).rows;
+}
+
+async function approveReplacementMaterialRequest(actor,requestId) {
+  const id=String(requestId||'');if(!/^\d+$/.test(id)||Number(id)<1)throw new AppError(400,'VALIDATION_ERROR','Replacement request ID must be a positive ID.');
+  return transaction(async(client)=>{
+    await client.query("SELECT set_config('app.current_user_id',$1,TRUE)",[String(actor)]);
+    const request=await client.query(`SELECT q.*,j.status AS job_status,j.order_item_id,oi.colour_id,r.current_status AS roll_status,r.roll_no
+      FROM production.replacement_material_requests q JOIN production.jobs j USING(job_id)
+      JOIN sales.order_items oi ON oi.order_item_id=j.order_item_id JOIN production.rolls r ON r.roll_id=q.rejected_roll_id
+      WHERE q.replacement_request_id=$1 FOR UPDATE OF q,j,r`,[id]);
+    if(!request.rowCount)notFound('Replacement material request');
+    const row=request.rows[0];
+    if(row.status!=='PENDING'||row.roll_status!=='REJECTED')throw new AppError(409,'REQUEST_NOT_PENDING','This rejected-roll material request is no longer awaiting approval.');
+    if(row.job_status==='CANCELLED')throw new AppError(409,'JOB_CANCELLED','Replacement materials cannot be issued to a cancelled production job.');
+    if(row.job_status==='COMPLETED')await client.query(`UPDATE production.jobs SET status='PAUSED',completed_at=NULL WHERE job_id=$1`,[row.job_id]);
+    const items=await client.query(`SELECT i.yarn_type_id,i.required_kg,yt.yarn_name FROM production.replacement_material_request_items i JOIN master.yarn_types yt USING(yarn_type_id) WHERE i.replacement_request_id=$1 ORDER BY i.yarn_type_id FOR UPDATE OF i,yt`,[id]);
+    if(!items.rowCount)throw new AppError(409,'EMPTY_MATERIAL_REQUEST','No raw-material quantities are recorded for this request.');
+    const issue=await client.query(`INSERT INTO inventory.material_issues(job_id,issued_by,remarks,replacement_request_id)
+      VALUES($1,$2,$3,$4) RETURNING material_issue_id,issue_no,issued_at`,[row.job_id,actor,`Replacement for rejected roll ${row.roll_no}`,id]);
+    for(const material of items.rows){
+      await client.query(`SELECT yarn_type_id FROM master.yarn_types WHERE yarn_type_id=$1 FOR UPDATE`,[material.yarn_type_id]);
+      const stock=await client.query(`SELECT COALESCE(sum(on_hand_qty_kg),0) AS quantity FROM inventory.yarn_lots
+        WHERE yarn_type_id=$1 AND status='ACTIVE' AND (colour_id IS NULL OR colour_id=$2)`,[material.yarn_type_id,row.colour_id]);
+      const reserved=await client.query(`SELECT COALESCE(sum(quantity_kg),0) AS quantity FROM inventory.yarn_reservations
+        WHERE yarn_type_id=$1 AND status='ACTIVE' AND order_item_id<>$2`,[material.yarn_type_id,row.order_item_id]);
+      let remaining=Number(material.required_kg);
+      if(Number(stock.rows[0].quantity)-Number(reserved.rows[0].quantity)<remaining)throw new AppError(409,'INSUFFICIENT_MATERIAL',`${material.yarn_name} has insufficient available stock; the request remains pending.`);
+      const lots=await client.query(`SELECT yarn_lot_id,on_hand_qty_kg,unit_cost_per_kg FROM inventory.yarn_lots
+        WHERE yarn_type_id=$1 AND status='ACTIVE' AND on_hand_qty_kg>0 AND (colour_id IS NULL OR colour_id=$2)
+        ORDER BY received_on,yarn_lot_id FOR UPDATE`,[material.yarn_type_id,row.colour_id]);
+      for(const lot of lots.rows){if(remaining<=0)break;const quantity=Math.min(remaining,Number(lot.on_hand_qty_kg));if(quantity<=0)continue;
+        await client.query(`INSERT INTO inventory.material_issue_items(material_issue_id,yarn_lot_id,quantity_kg,unit_cost_snapshot) VALUES($1,$2,$3,$4)`,[issue.rows[0].material_issue_id,lot.yarn_lot_id,quantity,lot.unit_cost_per_kg]);remaining-=quantity;}
+      if(remaining>0)throw new AppError(409,'INSUFFICIENT_MATERIAL',`${material.yarn_name} stock changed during approval; the issue was rolled back.`);
+    }
+    await client.query(`UPDATE production.replacement_material_requests SET status='ISSUED',approved_by=$2,approved_at=now(),material_issue_id=$3 WHERE replacement_request_id=$1`,[id,actor,issue.rows[0].material_issue_id]);
+    await client.query(`SELECT notification.notify_user($1,'STOCK','Replacement material approved',$2,'REPLACEMENT_REQUEST',$3)`,[row.requested_by,`Request ${row.request_no} for roll ${row.roll_no} has been issued. A replacement can now be assigned on job ${row.job_id}.`,id]);
+    return {...issue.rows[0],request_no:row.request_no,roll_no:row.roll_no,status:'ISSUED'};
+  });
+}
+
+module.exports = { dashboard,inventorySummary,lots,movements,lowStock,yarnTypes,colours,createYarn,updateYarn,suppliers,getSupplier,createSupplier,updateSupplier,purchaseOrders,purchaseOrder,purchaseOrderCustomerOrders,purchaseOrderShortages,createPurchaseOrder,updatePurchaseOrder,issuePurchaseOrder,cancelPurchaseOrder,receivePurchaseOrder,goodsReceipts,goodsReceipt,invoices,invoiceWorkflowDetail,createInvoice,payments,createPayment,completePayment,supervisors,customerOrdersForHandoff,handoffs,handoff,createHandoff,respondHandoff,createHandoffJob,issueHandoffMaterials,replacementMaterialRequests,approveReplacementMaterialRequest };

@@ -2,6 +2,7 @@
 
 const { pool } = require('../../../database/config/db');
 const AppError = require('../../../shared/errors/AppError');
+const { sendWorkerCredentials } = require('../../../shared/email/mailer');
 const bcrypt = require('bcryptjs');
 const crypto = require('node:crypto');
 
@@ -54,7 +55,7 @@ async function dashboard(userId) {
       (SELECT count(*) FROM master.machines WHERE is_active AND status='RUNNING') AS machines_running,
       (SELECT count(*) FROM master.machines WHERE is_active AND status='IDLE') AS machines_idle,
       (SELECT count(*) FROM master.machines WHERE is_active AND status IN ('BREAKDOWN','MAINTENANCE')) AS machines_unavailable,
-      (SELECT COALESCE(sum(pl.produced_meters),0) FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.store_handoffs h ON h.production_job_id=ma.job_id WHERE h.supervisor_user_id=$1 AND pl.logged_at::date=current_date) AS produced_today_m,
+      (SELECT COALESCE(sum(pl.good_meters),0) FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.store_handoffs h ON h.production_job_id=ma.job_id WHERE h.supervisor_user_id=$1 AND pl.logged_at::date=current_date) AS produced_today_m,
       (SELECT COALESCE(sum(pl.waste_meters),0) FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.store_handoffs h ON h.production_job_id=ma.job_id WHERE h.supervisor_user_id=$1 AND pl.logged_at::date=current_date) AS waste_today_m,
       (SELECT COALESCE(sum(r.length_meters),0) FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE h.supervisor_user_id=$1 AND r.produced_at::date=current_date AND r.current_status IN('PASSED','DISPATCHED')) AS qc_passed_today_m,
       (SELECT count(*) FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE h.supervisor_user_id=$1 AND r.current_status='PENDING_QC') AS pending_qc_rolls,
@@ -70,7 +71,7 @@ async function dashboard(userId) {
     pool.query(`SELECT m.machine_id,m.machine_code,m.machine_name,m.stage,m.status,ma.job_id,j.job_no
       FROM master.machines m LEFT JOIN production.machine_assignments ma ON ma.machine_id=m.machine_id AND ma.status IN ('ASSIGNED','RUNNING','PAUSED')
       LEFT JOIN production.jobs j ON j.job_id=ma.job_id WHERE m.is_active AND m.status IN ('BREAKDOWN','MAINTENANCE') ORDER BY m.machine_name LIMIT 8`),
-    pool.query(`SELECT sh.shift_name,COALESCE(sum(pl.produced_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters
+    pool.query(`SELECT sh.shift_name,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters
       FROM master.shifts sh LEFT JOIN production.production_logs pl ON pl.shift_id=sh.shift_id AND pl.logged_at::date=current_date
       LEFT JOIN production.machine_assignments ma USING(machine_assignment_id)
       LEFT JOIN production.store_handoffs h ON h.production_job_id=ma.job_id AND h.supervisor_user_id=$1
@@ -157,27 +158,84 @@ async function jobs(userId,query={}) {
 async function job(userId,jobId) {
   const result=await pool.query(`${jobSelect} WHERE e.job_id=$1 AND EXISTS(SELECT 1 FROM production.store_handoffs h WHERE h.production_job_id=e.job_id AND h.supervisor_user_id=$2)`,[id(jobId,'Job'),userId]);
   if(!result.rowCount)notFound('Production job');
-  const [logs,rolls,materials]=await Promise.all([
+  const [logs,rolls,materials,replacementRequests]=await Promise.all([
     pool.query(`SELECT pl.*,w.employee_code,u.full_name AS worker_name,sh.shift_name,m.machine_name FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN hr.workers w USING(worker_id) JOIN auth.users u USING(user_id) JOIN master.shifts sh ON sh.shift_id=pl.shift_id JOIN master.machines m USING(machine_id) WHERE ma.job_id=$1 ORDER BY pl.logged_at DESC`,[jobId]),
     pool.query(`SELECT r.*,l.machine_assignment_id,i.inspection_no,i.result AS latest_inspection,i.reason AS inspection_reason FROM production.rolls r LEFT JOIN production.production_logs l ON l.production_log_id=r.production_log_id LEFT JOIN LATERAL(SELECT * FROM quality.inspections qi WHERE qi.roll_id=r.roll_id ORDER BY qi.inspected_at DESC,qi.inspection_id DESC LIMIT 1)i ON true WHERE r.job_id=$1 ORDER BY r.produced_at DESC`,[jobId]),
     pool.query(`SELECT mi.material_issue_id,mi.issue_no,mi.issued_at,y.yarn_name,mii.quantity_kg FROM inventory.material_issues mi JOIN inventory.material_issue_items mii USING(material_issue_id) JOIN inventory.yarn_lots yl USING(yarn_lot_id) JOIN master.yarn_types y USING(yarn_type_id) WHERE mi.job_id=$1 ORDER BY mi.issued_at DESC`,[jobId]),
+    pool.query(`SELECT q.replacement_request_id,q.request_no,q.status,q.rejected_roll_id,r.roll_no,r.length_meters,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('yarn_type_id',i.yarn_type_id,'yarn_name',yt.yarn_name,'required_kg',i.required_kg) ORDER BY yt.yarn_name)
+          FROM production.replacement_material_request_items i JOIN master.yarn_types yt USING(yarn_type_id)
+          WHERE i.replacement_request_id=q.replacement_request_id),'[]'::jsonb) materials
+      FROM production.replacement_material_requests q JOIN production.rolls r ON r.roll_id=q.rejected_roll_id
+      WHERE q.job_id=$1 ORDER BY q.requested_at DESC`,[jobId]),
   ]);
-  return {...result.rows[0],logs:logs.rows,rolls:rolls.rows,materials:materials.rows};
+  return {...result.rows[0],logs:logs.rows,rolls:rolls.rows,materials:materials.rows,replacementRequests:replacementRequests.rows};
 }
 async function assignMachine(userId,jobId,input) {
  return transaction(async(client)=>{
    await actor(client,userId);
    const j=await client.query(`SELECT j.*,h.status AS handoff_status FROM production.jobs j JOIN production.store_handoffs h ON h.production_job_id=j.job_id WHERE j.job_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF j,h`,[id(jobId,'Job'),userId]);
    if(!j.rowCount)notFound('Production job');
+   const rework=await client.query(`SELECT count(*)::integer AS roll_count,COALESCE(sum(length_meters),0) AS rework_meters
+     FROM production.rolls WHERE job_id=$1 AND current_status='REWORK'`,[jobId]);
+   const openReplacement=await client.query(`SELECT count(*)::integer AS count FROM production.replacement_material_requests WHERE job_id=$1 AND status IN('PENDING','ISSUED')`,[jobId]);
+   let replacement=null;
+   if(input.replacementRequestId){
+     const request=await client.query(`SELECT q.replacement_request_id,q.request_no,q.status,q.job_id,r.current_status AS roll_status,r.length_meters
+       FROM production.replacement_material_requests q JOIN production.rolls r ON r.roll_id=q.rejected_roll_id
+       WHERE q.replacement_request_id=$1 AND q.job_id=$2 FOR UPDATE OF q`,[id(input.replacementRequestId,'Replacement request'),jobId]);
+     if(!request.rowCount)notFound('Replacement material request');
+     replacement=request.rows[0];
+     if(replacement.status!=='ISSUED'||replacement.roll_status!=='REJECTED')fail(409,'REPLACEMENT_MATERIALS_NOT_ISSUED','The Store Manager must approve and issue replacement materials before production is assigned.');
+   }
+   if(Number(openReplacement.rows[0].count)>0&&!replacement)fail(409,'REPLACEMENT_REQUEST_REQUIRED','Select an approved rejected-roll material request before assigning this production.');
+   const isRework=!replacement&&Number(rework.rows[0].roll_count)>0;
+   let selectedReworkRolls=[];
+   if(isRework){
+     const requested=Array.isArray(input.reworkRollIds)?[...new Set(input.reworkRollIds.map(value=>id(value,'Rework roll')))]:[];
+     if(!requested.length)fail(400,'REWORK_ROLLS_REQUIRED','Select the rework rolls for this machine assignment.');
+     if(requested.length>100)fail(400,'REWORK_ROLLS_LIMIT','An assignment can include up to 100 rework rolls.');
+     const selected=await client.query(`SELECT r.roll_id,r.length_meters,
+         (SELECT qi.inspection_id FROM quality.inspections qi WHERE qi.roll_id=r.roll_id ORDER BY qi.inspected_at DESC,qi.inspection_id DESC LIMIT 1) AS source_inspection_id
+       FROM production.rolls r WHERE r.job_id=$1 AND r.current_status='REWORK' AND r.roll_id=ANY($2::bigint[])
+       ORDER BY r.roll_id FOR UPDATE`,[jobId,requested]);
+     if(selected.rowCount!==requested.length)fail(409,'REWORK_ROLLS_CHANGED','One or more selected rolls are no longer awaiting rework. Refresh the job and select again.');
+     selectedReworkRolls=selected.rows;
+   }
    const materialIssue=await client.query(`SELECT EXISTS(SELECT 1 FROM inventory.material_issues WHERE job_id=$1) AS issued`,[jobId]);
    if(!materialIssue.rows[0].issued)fail(409,'MATERIALS_NOT_ISSUED','The Store Manager must issue the reserved materials before assigning production machinery.');
-   if(!['PLANNED','ASSIGNED','PAUSED'].includes(j.rows[0].status))fail(409,'INVALID_JOB_STATE','This job cannot be assigned in its current state.');
+   if(!['PLANNED','ASSIGNED','PAUSED'].includes(j.rows[0].status)&&!(j.rows[0].status==='COMPLETED'&&(isRework||replacement)))fail(409,'INVALID_JOB_STATE','Only an open job or a completed job with an approved rework or replacement request can be assigned.');
    const machine=await client.query(`SELECT machine_id,stage,status FROM master.machines WHERE machine_id=$1 AND is_active FOR UPDATE`,[id(input.machineId,'Machine')]);
    if(!machine.rowCount)notFound('Active machine'); if(machine.rows[0].stage!==j.rows[0].stage)fail(400,'MACHINE_STAGE_MISMATCH','The selected machine is configured for a different production stage.');
    if(['BREAKDOWN','MAINTENANCE'].includes(machine.rows[0].status))fail(409,'MACHINE_UNAVAILABLE',`The machine is currently ${machine.rows[0].status.toLowerCase()}.`);
    const shift=await client.query(`SELECT shift_id FROM master.shifts WHERE shift_id=$1 AND is_active`,[id(input.shiftId,'Shift')]); if(!shift.rowCount)notFound('Active shift');
-   const result=await client.query(`INSERT INTO production.machine_assignments(job_id,machine_id,shift_id,assigned_by,notes) VALUES($1,$2,$3,$4,$5) RETURNING machine_assignment_id,status,assigned_at`,[jobId,machine.rows[0].machine_id,shift.rows[0].shift_id,userId,String(input.notes||'').slice(0,500)||null]);
-   await client.query(`UPDATE production.jobs SET status='ASSIGNED' WHERE job_id=$1 AND status IN('PLANNED','PAUSED')`,[jobId]); return result.rows[0];
+   const note=String(input.notes||'').trim().slice(0,450);
+   const reworkTarget=selectedReworkRolls.reduce((sum,roll)=>sum+Number(roll.length_meters),0);
+   const assignmentNotes=replacement?`REPLACEMENT: ${replacement.request_no}${note?` · ${note}`:''}`:isRework?`REWORK: ${note||`${selectedReworkRolls.length} selected roll(s), ${reworkTarget} m`}`:note||null;
+   const result=await client.query(`INSERT INTO production.machine_assignments(job_id,machine_id,shift_id,assigned_by,notes,replacement_request_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING machine_assignment_id,status,assigned_at,notes,replacement_request_id`,[jobId,machine.rows[0].machine_id,shift.rows[0].shift_id,userId,assignmentNotes,replacement?.replacement_request_id||null]);
+   for(const roll of selectedReworkRolls)await client.query(`INSERT INTO production.machine_assignment_rework_rolls(machine_assignment_id,roll_id,source_inspection_id,assigned_by) VALUES($1,$2,$3,$4)`,[result.rows[0].machine_assignment_id,roll.roll_id,roll.source_inspection_id,userId]);
+   let carriedWorkers=0;
+   if(isRework&&!replacement){
+     const reassigned=await client.query(`INSERT INTO production.job_worker_assignments(machine_assignment_id,worker_id,assigned_by,notes)
+       SELECT $1,previous.worker_id,$2,'Automatically reassigned for quality rework'
+       FROM (
+         SELECT DISTINCT ON (jwa.worker_id) jwa.worker_id,jwa.ended_at,jwa.unassigned_at
+         FROM production.job_worker_assignments jwa
+         JOIN production.machine_assignments previous_ma ON previous_ma.machine_assignment_id=jwa.machine_assignment_id
+         JOIN hr.workers w ON w.worker_id=jwa.worker_id AND w.is_active
+         JOIN auth.users au ON au.user_id=w.user_id AND au.is_active
+         WHERE previous_ma.job_id=$3 AND (w.skill_stage IS NULL OR w.skill_stage=$4)
+         ORDER BY jwa.worker_id,previous_ma.assigned_at DESC,jwa.assigned_at DESC
+       ) previous
+       WHERE previous.ended_at IS NOT NULL AND previous.unassigned_at IS NULL
+         AND NOT EXISTS (
+         SELECT 1 FROM production.job_worker_assignments active
+         WHERE active.worker_id=previous.worker_id AND active.ended_at IS NULL AND active.unassigned_at IS NULL
+       )
+       RETURNING worker_id`,[result.rows[0].machine_assignment_id,userId,jobId,j.rows[0].stage]);
+     carriedWorkers=reassigned.rowCount;
+   }
+   await client.query(`UPDATE production.jobs SET status='ASSIGNED',completed_at=NULL WHERE job_id=$1 AND status IN('PLANNED','PAUSED','COMPLETED')`,[jobId]); return {...result.rows[0],is_rework:isRework,rework_roll_count:rework.rows[0].roll_count,rework_meters:rework.rows[0].rework_meters,reassigned_worker_count:carriedWorkers,replacement_request:replacement||null};
  });
 }
 
@@ -200,7 +258,8 @@ async function createWorker(userId,input) {
  if(!designations.includes(designation))fail(400,'VALIDATION_ERROR','Choose a valid worker designation.');
  if(stage&&!['SPINNING','WEAVING','DYEING'].includes(stage))fail(400,'VALIDATION_ERROR','Choose a valid production skill stage.');
  const shiftId=id(input.shiftId,'Shift');
- const temporaryPassword=crypto.randomBytes(18).toString('base64url');
+ const passwordAlphabet='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
+ const temporaryPassword=Array.from({length:8},()=>passwordAlphabet[crypto.randomInt(passwordAlphabet.length)]).join('');
  const passwordHash=await bcrypt.hash(temporaryPassword,Math.min(14,Math.max(10,Number(process.env.BCRYPT_ROUNDS||12))));
  const worker=await transaction(async(client)=>{
   await actor(client,userId);
@@ -212,9 +271,11 @@ async function createWorker(userId,input) {
   if(!role.rowCount)fail(503,'WORKER_ROLE_UNAVAILABLE','Worker account provisioning is not available.');
   const account=await client.query(`INSERT INTO auth.users(role_id,full_name,email,phone,password_hash,must_change_password,created_by) VALUES($1,$2,$3,$4,$5,true,$6) RETURNING user_id,full_name,email,phone`,[role.rows[0].role_id,fullName,email,phone,passwordHash,userId]);
   const result=await client.query(`INSERT INTO hr.workers(user_id,designation,skill_stage,default_shift_id,wage_type,daily_rate) VALUES($1,$2,$3,$4,'DAILY',0) RETURNING worker_id,employee_code,designation,skill_stage,default_shift_id`,[account.rows[0].user_id,designation,stage,shift.rows[0].shift_id]);
-  return {...result.rows[0],...account.rows[0],shift_name:(await client.query(`SELECT shift_name FROM master.shifts WHERE shift_id=$1`,[shiftId])).rows[0].shift_name};
+  const worker={...result.rows[0],...account.rows[0],shift_name:(await client.query(`SELECT shift_name FROM master.shifts WHERE shift_id=$1`,[shiftId])).rows[0].shift_name};
+  await sendWorkerCredentials({to:email,fullName,employeeCode:worker.employee_code,temporaryPassword});
+  return worker;
  });
- return {worker,temporaryPassword};
+ return {worker,emailSent:true};
 }
 async function updateWorkerShift(userId,workerId,shiftId) {
  return transaction(async(client)=>{await actor(client,userId);const shift=await client.query(`SELECT shift_id,shift_name FROM master.shifts WHERE shift_id=$1 AND is_active`,[id(shiftId,'Shift')]);if(!shift.rowCount)notFound('Active shift');const result=await client.query(`UPDATE hr.workers SET default_shift_id=$2 WHERE worker_id=$1 AND is_active RETURNING worker_id,employee_code,default_shift_id`,[id(workerId,'Worker'),shift.rows[0].shift_id]);if(!result.rowCount)notFound('Active worker');return {...result.rows[0],shift_name:shift.rows[0].shift_name};});
@@ -245,7 +306,7 @@ async function machines() {
   ma.machine_assignment_id,ma.status AS assignment_status,ma.assigned_at,ma.started_at AS assignment_started_at,sh.shift_name,
   j.job_id,j.job_no,j.status AS job_status,e.order_no,e.company_name,e.fabric_name,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('worker_id',w.worker_id,'job_worker_assignment_id',jwa.job_worker_assignment_id,'name',u.full_name,'employee_code',w.employee_code)) FROM production.job_worker_assignments jwa JOIN hr.workers w USING(worker_id) JOIN auth.users u USING(user_id) WHERE jwa.machine_assignment_id=ma.machine_assignment_id AND jwa.ended_at IS NULL),'[]'::jsonb) workers,
-  COALESCE((SELECT sum(pl.produced_meters) FROM production.production_logs pl WHERE pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date=current_date),0) produced_today_m,
+  COALESCE((SELECT sum(pl.good_meters) FROM production.production_logs pl WHERE pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date=current_date),0) produced_today_m,
   COALESCE((SELECT sum(pl.waste_meters) FROM production.production_logs pl WHERE pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date=current_date),0) waste_today_m,
   COALESCE((SELECT sum(pl.downtime_minutes) FROM production.production_logs pl WHERE pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date=current_date),0) downtime_today_min,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('old_status',ev.old_status,'new_status',ev.new_status,'reason',ev.reason,'started_at',ev.started_at,'ended_at',ev.ended_at) ORDER BY ev.started_at DESC) FROM production.machine_status_events ev WHERE ev.machine_id=m.machine_id),'[]'::jsonb) status_history
@@ -302,7 +363,7 @@ async function rolls(userId,query={}) {
 }
 async function createRoll(userId,input) {
  const length=Number(input.lengthMeters), weight=input.weightKg==null||input.weightKg===''?null:Number(input.weightKg); if(!Number.isFinite(length)||length<=0)fail(400,'VALIDATION_ERROR','Roll length must be greater than zero.');if(weight!==null&&(!Number.isFinite(weight)||weight<=0))fail(400,'VALIDATION_ERROR','Roll weight must be greater than zero.');
- return transaction(async(client)=>{await actor(client,userId);const log=await client.query(`SELECT pl.production_log_id,pl.produced_meters,pl.worker_id,pl.shift_id,ma.machine_id,ma.job_id,j.order_item_id,h.supervisor_user_id FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id WHERE pl.production_log_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF pl`,[id(input.productionLogId,'Production log'),userId]);if(!log.rowCount)notFound('Production log');const row=log.rows[0];const used=await client.query(`SELECT COALESCE(sum(length_meters),0) used_m FROM production.rolls WHERE production_log_id=$1`,[row.production_log_id]);if(Number(used.rows[0].used_m)+length>Number(row.produced_meters))fail(409,'ROLL_OUTPUT_EXCEEDED','Roll length exceeds unallocated metres from this production log.');const result=await client.query(`INSERT INTO production.rolls(order_item_id,job_id,production_log_id,machine_id,shift_id,produced_by_worker_id,length_meters,weight_kg,label_qr_value,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING roll_id,roll_no,current_status,length_meters,weight_kg,label_qr_value,produced_at`,[row.order_item_id,row.job_id,row.production_log_id,row.machine_id,row.shift_id,row.worker_id,length,weight,String(input.label||'').trim()||null,String(input.notes||'').slice(0,500)||null]);return result.rows[0];});
+ return transaction(async(client)=>{await actor(client,userId);const log=await client.query(`SELECT pl.production_log_id,pl.good_meters,pl.worker_id,pl.shift_id,ma.machine_id,ma.job_id,j.order_item_id,h.supervisor_user_id FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id WHERE pl.production_log_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF pl`,[id(input.productionLogId,'Production log'),userId]);if(!log.rowCount)notFound('Production log');const row=log.rows[0];const used=await client.query(`SELECT COALESCE(sum(length_meters),0) used_m FROM production.rolls WHERE production_log_id=$1`,[row.production_log_id]);if(Number(used.rows[0].used_m)+length>Number(row.good_meters))fail(409,'ROLL_OUTPUT_EXCEEDED','Roll length exceeds unallocated net good metres after waste.');const result=await client.query(`INSERT INTO production.rolls(order_item_id,job_id,production_log_id,machine_id,shift_id,produced_by_worker_id,length_meters,weight_kg,label_qr_value,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING roll_id,roll_no,current_status,length_meters,weight_kg,label_qr_value,produced_at`,[row.order_item_id,row.job_id,row.production_log_id,row.machine_id,row.shift_id,row.worker_id,length,weight,String(input.label||'').trim()||null,String(input.notes||'').slice(0,500)||null]);return result.rows[0];});
 }
 
 async function qualityPending(userId,query={}) { return rolls(userId,{...query,state:'pending'}); }
@@ -316,12 +377,37 @@ async function inspectRoll(userId,rollId,input) {
  if(!Array.isArray(input.defects)||input.defects.length>30)fail(400,'VALIDATION_ERROR','Defects must be a list of at most 30 records.');
  const seen=new Set();const defects=input.defects.map((d)=>{const defectTypeId=id(d.defectTypeId,'Defect type'),severity=String(d.severity||'').toUpperCase(),count=Number(d.count??1);if(!['MINOR','MAJOR','CRITICAL'].includes(severity)||!Number.isInteger(count)||count<1)fail(400,'VALIDATION_ERROR','Defect severity or count is invalid.');if(seen.has(`${defectTypeId}:${severity}`))fail(400,'VALIDATION_ERROR','Each defect type and severity can be added only once.');seen.add(`${defectTypeId}:${severity}`);return {defectTypeId,severity,count,notes:String(d.notes||'').slice(0,300)};});
  if(result==='PASS'&&defects.some((d)=>d.severity!=='MINOR'))fail(400,'MAJOR_DEFECT_CANNOT_PASS','A roll with major or critical defects cannot pass inspection.');
- return transaction(async(client)=>{await actor(client,userId);const roll=await client.query(`SELECT r.roll_id,r.current_status,h.supervisor_user_id FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE r.roll_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF r`,[id(rollId,'Roll'),userId]);if(!roll.rowCount)notFound('Roll');if(roll.rows[0].current_status==='DISPATCHED')fail(409,'ROLL_DISPATCHED','A dispatched roll cannot be inspected.');if(roll.rows[0].current_status==='REJECTED')fail(409,'ROLL_REJECTED','Rejected rolls are terminal and cannot be reinspected.');if(!['PENDING_QC','REWORK'].includes(roll.rows[0].current_status))fail(409,'ROLL_NOT_INSPECTABLE','Only pending QC or rework rolls can be inspected.');
+ return transaction(async(client)=>{await actor(client,userId);const roll=await client.query(`SELECT r.roll_id,r.job_id,r.order_item_id,r.length_meters,r.current_status,r.replacement_request_id,oi.fabric_type_id,h.supervisor_user_id FROM production.rolls r JOIN sales.order_items oi ON oi.order_item_id=r.order_item_id JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE r.roll_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF r`,[id(rollId,'Roll'),userId]);if(!roll.rowCount)notFound('Roll');if(roll.rows[0].current_status==='DISPATCHED')fail(409,'ROLL_DISPATCHED','A dispatched roll cannot be inspected.');if(roll.rows[0].current_status==='REJECTED')fail(409,'ROLL_REJECTED','Rejected rolls are terminal and cannot be reinspected.');if(!['PENDING_QC','REWORK'].includes(roll.rows[0].current_status))fail(409,'ROLL_NOT_INSPECTABLE','Only pending QC or rework rolls can be inspected.');
+  if(result==='PASS'&&roll.rows[0].current_status==='REWORK'){
+    const progress=await client.query(`SELECT latest.inspection_id,COALESCE(sum(a.allocated_meters),0) AS allocated_meters
+      FROM (SELECT inspection_id FROM quality.inspections WHERE roll_id=$1 ORDER BY inspected_at DESC,inspection_id DESC LIMIT 1) latest
+      LEFT JOIN production.machine_assignment_rework_rolls ar ON ar.roll_id=$1 AND ar.source_inspection_id=latest.inspection_id
+      LEFT JOIN production.rework_roll_log_allocations a ON a.roll_id=ar.roll_id
+      LEFT JOIN production.production_logs pl ON pl.production_log_id=a.production_log_id AND pl.machine_assignment_id=ar.machine_assignment_id
+      GROUP BY latest.inspection_id`,[rollId]);
+    if(!progress.rowCount||Number(progress.rows[0].allocated_meters)<Number(roll.rows[0].length_meters))fail(409,'REWORK_INCOMPLETE','The full selected roll length must be logged as net good rework before it can pass inspection.');
+  }
   for(const d of defects){const exists=await client.query(`SELECT 1 FROM master.defect_types WHERE defect_type_id=$1 AND is_active`,[d.defectTypeId]);if(!exists.rowCount)fail(400,'INVALID_DEFECT_TYPE','Choose an active defect type.');}
   const inspection=await client.query(`INSERT INTO quality.inspections(roll_id,result,inspected_by,reason,rework_instructions,notes) VALUES($1,$2,$3,$4,$5,$6) RETURNING inspection_id,inspection_no,result,inspected_at,reason,rework_instructions,notes`,[rollId,result,userId,why||null,instructions||null,notes||null]);
   for(const d of defects)await client.query(`INSERT INTO quality.inspection_defects(inspection_id,defect_type_id,severity,defect_count,notes) VALUES($1,$2,$3,$4,$5)`,[inspection.rows[0].inspection_id,d.defectTypeId,d.severity,d.count,d.notes||null]);
-  if(result!=='PASS'){const owner=await client.query(`SELECT created_by FROM production.store_handoffs WHERE production_job_id=(SELECT job_id FROM production.rolls WHERE roll_id=$1)`,[rollId]);if(owner.rowCount)await client.query(`INSERT INTO notification.user_notifications(recipient_user_id,category,title,message,entity_type,entity_id) VALUES($1,'QUALITY',$2,$3,'ROLL',$4)`,[owner.rows[0].created_by,result==='REJECT'?'Fabric roll rejected':'Fabric roll requires rework',`Roll inspection ${inspection.rows[0].inspection_no}: ${why}`,rollId]);}
-  return {...inspection.rows[0],defects};
+  if(result==='PASS'&&roll.rows[0].replacement_request_id){const request=await client.query(`SELECT q.replacement_request_id,r.length_meters AS target_meters,
+      COALESCE((SELECT sum(rr.length_meters) FROM production.rolls rr WHERE rr.replacement_request_id=q.replacement_request_id AND rr.current_status='PASSED'),0) AS passed_meters
+      FROM production.replacement_material_requests q JOIN production.rolls r ON r.roll_id=q.rejected_roll_id
+      WHERE q.replacement_request_id=$1 FOR UPDATE OF q`,[roll.rows[0].replacement_request_id]);if(request.rowCount&&Number(request.rows[0].passed_meters)>=Number(request.rows[0].target_meters))await client.query(`UPDATE production.replacement_material_requests SET status='COMPLETED',completed_at=now() WHERE replacement_request_id=$1 AND status='PRODUCED'`,[request.rows[0].replacement_request_id]);}
+  if(result!=='PASS'){const owner=await client.query(`SELECT created_by FROM production.store_handoffs WHERE production_job_id=$1`,[roll.rows[0].job_id]);if(owner.rowCount)await client.query(`INSERT INTO notification.user_notifications(recipient_user_id,category,title,message,entity_type,entity_id) VALUES($1,'QUALITY',$2,$3,'ROLL',$4)`,[owner.rows[0].created_by,result==='REJECT'?'Fabric roll rejected':'Fabric roll requires rework',`Roll inspection ${inspection.rows[0].inspection_no}: ${why}`,rollId]);}
+  let replacementRequest=null;
+  if(result==='REJECT'){
+    const bom=await client.query(`SELECT fb.yarn_type_id,ROUND(GREATEST($1::numeric*fb.kg_per_meter*(1+fb.wastage_percent/100),0.001),3) AS required_kg
+      FROM master.fabric_bom fb JOIN master.yarn_types yt USING(yarn_type_id)
+      WHERE fb.fabric_type_id=$2 AND yt.is_active ORDER BY fb.yarn_type_id`,[roll.rows[0].length_meters,roll.rows[0].fabric_type_id]);
+    if(!bom.rowCount)fail(409,'MISSING_BOM','The rejected roll cannot be sent for replacement because its product has no active bill of materials.');
+    const request=await client.query(`INSERT INTO production.replacement_material_requests(job_id,rejected_roll_id,requested_by)
+      VALUES($1,$2,$3) RETURNING replacement_request_id,request_no,status,requested_at`,[roll.rows[0].job_id,rollId,userId]);
+    replacementRequest=request.rows[0];
+    for(const material of bom.rows)await client.query(`INSERT INTO production.replacement_material_request_items(replacement_request_id,yarn_type_id,required_kg) VALUES($1,$2,$3)`,[replacementRequest.replacement_request_id,material.yarn_type_id,material.required_kg]);
+    await client.query(`SELECT notification.notify_role('STORE_MANAGER','STOCK',$1,$2,'REPLACEMENT_REQUEST',$3)`,[`Replacement materials requested · ${replacementRequest.request_no}`,`Roll ${rollId} was rejected. Review and approve its replacement materials for the linked production job.`,replacementRequest.replacement_request_id]);
+  }
+  return {...inspection.rows[0],defects,replacementRequest};
  });
 }
 async function inspections(userId,query={}) {return (await pool.query(`SELECT i.inspection_id,i.inspection_no,i.result,i.inspected_at,i.reason,i.rework_instructions,r.roll_id,r.roll_no,r.length_meters,e.job_no,e.order_no,e.fabric_name,u.full_name AS inspector_name FROM quality.inspections i JOIN production.rolls r USING(roll_id) JOIN reporting.production_job_efficiency e USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=r.job_id JOIN auth.users u ON u.user_id=i.inspected_by WHERE h.supervisor_user_id=$1 ORDER BY i.inspected_at DESC LIMIT $2 OFFSET $3`,[userId,Math.min(Math.max(Number(query.limit)||50,1),100),Math.max(Number(query.offset)||0,0)])).rows;}
@@ -331,7 +417,7 @@ async function report(userId,kind,query={}) {
  const from=String(query.from||new Date().toISOString().slice(0,10)),to=String(query.to||from);const valid=/^\d{4}-\d{2}-\d{2}$/;
  if(!valid.test(from)||!valid.test(to)||from>to)fail(400,'VALIDATION_ERROR','Use a valid date range with from on or before to.');
  if(kind==='production')return (await pool.query(`WITH period_logs AS (
-    SELECT ma.job_id,sum(pl.produced_meters) produced_meters,sum(pl.waste_meters) waste_meters,sum(pl.downtime_minutes) downtime_minutes
+    SELECT ma.job_id,sum(pl.good_meters) produced_meters,sum(pl.waste_meters) waste_meters,sum(pl.downtime_minutes) downtime_minutes
     FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id)
     WHERE pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY ma.job_id
   ), period_qc AS (
@@ -348,8 +434,8 @@ async function report(userId,kind,query={}) {
     WHERE EXISTS(SELECT 1 FROM production.store_handoffs h WHERE h.production_job_id=e.job_id AND h.supervisor_user_id=$1)
       AND (l.job_id IS NOT NULL OR q.job_id IS NOT NULL) ORDER BY e.job_no`,[userId,from,to])).rows;
  if(kind==='quality')return (await pool.query(`SELECT r.current_status,count(*)::int AS rolls,COALESCE(sum(r.length_meters),0) meters FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE h.supervisor_user_id=$1 AND r.produced_at::date BETWEEN $2::date AND $3::date GROUP BY r.current_status ORDER BY r.current_status`,[userId,from,to])).rows;
- if(kind==='machines')return (await pool.query(`SELECT m.machine_code,m.machine_name,m.stage,COALESCE(sum(pl.produced_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM master.machines m JOIN production.machine_assignments ma USING(machine_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY m.machine_id ORDER BY m.machine_code`,[userId,from,to])).rows;
- return (await pool.query(`SELECT w.employee_code,u.full_name,COALESCE(sum(pl.produced_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM hr.workers w JOIN auth.users u USING(user_id) JOIN production.job_worker_assignments jwa USING(worker_id) JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.worker_id=w.worker_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY w.worker_id,u.full_name ORDER BY produced_meters DESC,w.employee_code`,[userId,from,to])).rows;
+ if(kind==='machines')return (await pool.query(`SELECT m.machine_code,m.machine_name,m.stage,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM master.machines m JOIN production.machine_assignments ma USING(machine_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY m.machine_id ORDER BY m.machine_code`,[userId,from,to])).rows;
+ return (await pool.query(`SELECT w.employee_code,u.full_name,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM hr.workers w JOIN auth.users u USING(user_id) JOIN production.job_worker_assignments jwa USING(worker_id) JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.worker_id=w.worker_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY w.worker_id,u.full_name ORDER BY produced_meters DESC,w.employee_code`,[userId,from,to])).rows;
 }
 
 module.exports={dashboard,handoffs,handoff,transitionHandoff,createJob,jobs,job,assignMachine,workers,createWorker,updateWorkerShift,shifts,assignWorker,unassignWorker,machines,createMachine,machine,machineHistory,statusEvent,breakdowns,logs,rolls,createRoll,qualityPending,rollDetail,defectTypes,inspectRoll,inspections,inspectionDetail,report};

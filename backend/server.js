@@ -18,6 +18,7 @@ function createApp(origins) {
   const supervisorRoutes = require('./modules/supervisor/routes/supervisorRoutes');
   const workerRoutes = require('./modules/worker/routes/workerRoutes');
   const ownerRoutes = require('./modules/owner/routes/ownerRoutes');
+  const dispatchRoutes = require('./modules/dispatch/routes/dispatchRoutes');
   const notFound = require('./shared/middleware/notFound');
   const errorHandler = require('./shared/middleware/errorHandler');
   const { pool } = require('./database/config/db');
@@ -69,6 +70,7 @@ function createApp(origins) {
   app.use('/api/supervisor', supervisorRoutes);
   app.use('/api/worker', workerRoutes);
   app.use('/api/owner', ownerRoutes);
+  app.use('/api/dispatch', dispatchRoutes);
   app.use(notFound);
   app.use(errorHandler);
   return app;

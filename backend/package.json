@@ -14,6 +14,7 @@
     "seed:dev": "node scripts/seedDevStoreManager.js",
     "seed:owner": "node scripts/seedDevOwner.js",
     "seed:worker": "node scripts/seedDevWorker.js",
+    "seed:dispatch": "node scripts/seedDevDispatchOfficer.js",
     "test": "node --test"
   },
   "dependencies": {

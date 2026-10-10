@@ -45,7 +45,7 @@ function receive(input) {
 }
 function invoice(input) {
   if (!input || !Array.isArray(input.items) || !input.items.length || input.items.length > 100) fail('Invoice must include one or more received items.');
-  return { purchaseOrderId: id(input.purchaseOrderId, 'Purchase order'), goodsReceiptId: id(input.goodsReceiptId, 'Goods receipt'), invoiceDate: input.invoiceDate || null, dueDate: input.dueDate || null, notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ goodsReceiptItemId: id(line.goodsReceiptItemId, 'Receipt item'), quantityKg: positive(line.quantityKg, 'Billed quantity') })) };
+  return { purchaseOrderId: id(input.purchaseOrderId, 'Purchase order'), goodsReceiptId: id(input.goodsReceiptId, 'Goods receipt'), correctionInvoiceId: input.correctionInvoiceId ? id(input.correctionInvoiceId, 'Correction invoice') : null, invoiceDate: input.invoiceDate || null, dueDate: input.dueDate || null, supplierInvoiceNo: text(input.supplierInvoiceNo, 'Supplier invoice number', 120, false), notes: text(input.notes, 'Notes', 1000, false), items: input.items.map((line) => ({ goodsReceiptItemId: id(line.goodsReceiptItemId, 'Receipt item'), quantityKg: positive(line.quantityKg, 'Billed quantity') })) };
 }
 function payment(input) {
   const methods = ['BANK_TRANSFER', 'UPI', 'CHEQUE', 'CASH', 'OTHER'];

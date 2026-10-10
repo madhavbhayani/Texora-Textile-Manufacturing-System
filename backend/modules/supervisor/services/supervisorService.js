@@ -192,12 +192,12 @@ async function shifts() { return (await pool.query(`SELECT shift_id,shift_name,s
 async function createWorker(userId,input) {
  const fullName=String(input.fullName||'').trim(),email=String(input.email||'').trim().toLowerCase()||null;
  const phone=String(input.phone||'').trim().replace(/[\s().-]/g,'')||null;
- const designation=String(input.designation||'').trim()||null,stage=String(input.skillStage||'').trim().toUpperCase()||null;
+ const designation=String(input.designation||'').trim(),stage=String(input.skillStage||'').trim().toUpperCase()||null;
+ const designations=['Machine Operator','Weaver','Spinner','Dyeing Operator','Quality Inspector','Production Helper'];
  if(fullName.length<2||fullName.length>160)fail(400,'VALIDATION_ERROR','Worker name must be between 2 and 160 characters.');
- if(!email&&!phone)fail(400,'VALIDATION_ERROR','Enter an email address or phone number for the worker login.');
- if(email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254))fail(400,'VALIDATION_ERROR','Enter a valid email address.');
- if(phone&&!/^\+?\d{10,15}$/.test(phone))fail(400,'VALIDATION_ERROR','Phone number must contain 10 to 15 digits, with an optional leading +.');
- if(designation&&designation.length>120)fail(400,'VALIDATION_ERROR','Designation must be at most 120 characters.');
+ if(!email||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254)fail(400,'VALIDATION_ERROR','Enter a valid worker email address.');
+ if(!phone||!/^\+?\d{10,15}$/.test(phone))fail(400,'VALIDATION_ERROR','Enter a phone number with 10 to 15 digits, with an optional leading +.');
+ if(!designations.includes(designation))fail(400,'VALIDATION_ERROR','Choose a valid worker designation.');
  if(stage&&!['SPINNING','WEAVING','DYEING'].includes(stage))fail(400,'VALIDATION_ERROR','Choose a valid production skill stage.');
  const shiftId=id(input.shiftId,'Shift');
  const temporaryPassword=crypto.randomBytes(18).toString('base64url');
@@ -236,7 +236,7 @@ async function unassignWorker(userId,workerAssignmentId) {
   const a=await client.query(`SELECT jwa.*,ma.status AS machine_assignment_status,j.job_id,h.supervisor_user_id FROM production.job_worker_assignments jwa JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id WHERE jwa.job_worker_assignment_id=$1 AND h.supervisor_user_id=$2 FOR UPDATE OF jwa,ma`,[id(workerAssignmentId,'Worker assignment'),userId]);
   if(!a.rowCount)notFound('Active worker assignment'); if(a.rows[0].ended_at)fail(409,'WORKER_NOT_ASSIGNED','This worker assignment has already ended.');
   if(a.rows[0].machine_assignment_status==='RUNNING')fail(409,'MACHINE_RUNNING','Pause or stop the running machine through the authorized worker workflow before unassigning this worker.');
-  return (await client.query(`UPDATE production.job_worker_assignments SET ended_at=now() WHERE job_worker_assignment_id=$1 AND ended_at IS NULL RETURNING job_worker_assignment_id,ended_at`,[workerAssignmentId])).rows[0];
+  return (await client.query(`UPDATE production.job_worker_assignments SET ended_at=now(),unassigned_at=now() WHERE job_worker_assignment_id=$1 AND ended_at IS NULL RETURNING job_worker_assignment_id,ended_at,unassigned_at`,[workerAssignmentId])).rows[0];
  });
 }
 
@@ -262,7 +262,7 @@ async function createMachine(userId,input) {
  if(name.length<2||name.length>120)fail(400,'VALIDATION_ERROR','Machine name must be between 2 and 120 characters.');
  if(!['SPINNING','WEAVING','DYEING'].includes(stage))fail(400,'VALIDATION_ERROR','Choose a valid production stage.');
  if(location.length>160)fail(400,'VALIDATION_ERROR','Location must be at most 160 characters.');
- if(capacity!==null&&(!Number.isFinite(capacity)||capacity<=0))fail(400,'VALIDATION_ERROR','Capacity per hour must be greater than zero.');
+ if(capacity===null||!Number.isFinite(capacity)||capacity<=0)fail(400,'VALIDATION_ERROR','Capacity per hour is required and must be greater than zero.');
  if(commissionedOn&&!/^\d{4}-\d{2}-\d{2}$/.test(commissionedOn))fail(400,'VALIDATION_ERROR','Commissioned date must use YYYY-MM-DD.');
  return transaction(async(client)=>{
   await actor(client,userId);

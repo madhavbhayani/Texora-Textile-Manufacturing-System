@@ -27,8 +27,8 @@ export default function Signup() {
     if (Object.keys(nextErrors).length) return;
     setBusy(true);
     try {
-      await registerCustomer({ company: values.company.trim(), fullName: values.fullName.trim(), email: values.email.trim(), phone: values.phone.trim(), password: values.password });
-      setSuccess('Your customer account has been created. You can now sign in.'); setValues(initialValues);
+      await registerCustomer({ company: values.company.trim(), fullName: values.fullName.trim(), email: values.email.trim(), phone: values.phone.trim(), password: values.password, confirmPassword: values.confirmPassword });
+      setSuccess('Your Texora customer account is ready.'); setValues(initialValues);
     } catch (error) { setFormError(error.message || 'We could not create your account. Please try again.'); }
     finally { setBusy(false); }
   };

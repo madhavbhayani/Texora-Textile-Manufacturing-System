@@ -1,0 +1,63 @@
+.supervisor-page { display: grid; gap: 13px; }
+.supervisor-metrics { grid-template-columns: repeat(auto-fit,minmax(138px,1fr)); margin: 0; }
+.supervisor-metric { color: inherit; text-decoration: none; transition: border-color .15s ease,transform .15s ease; }
+.supervisor-metric:hover { border-color: var(--color-primary); transform: translateY(-1px); }
+.supervisor-metric strong { font-size: 1.1rem; }
+.supervisor-dashboard-grid { gap: 13px; }
+.supervisor-dashboard-grid > .admin-card { min-width: 0; }
+.supervisor-dashboard-grid .admin-table { white-space: normal; }
+.supervisor-dashboard-grid .admin-table td,.supervisor-dashboard-grid .admin-table th { max-width: 210px; }
+.supervisor-text-link { display: inline-flex; margin-top: 10px; color: var(--color-info); font-size: .75rem; font-weight: 700; text-decoration: none; }
+.supervisor-refresh-state { display: inline-flex; align-items: center; gap: 7px; color: var(--color-muted); font-size: .72rem; }
+.supervisor-record-list { display: grid; gap: 11px; }
+.supervisor-record { display: grid; gap: 10px; }
+.supervisor-record-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 13px; }
+.supervisor-record-heading h2 { margin: 3px 0 4px; }
+.supervisor-record-heading p,.supervisor-record > p,.supervisor-machine-card > p { margin: 0; color: var(--color-muted); font-size: .74rem; line-height: 1.5; }
+.sm-kicker { color: var(--color-primary); font-size: .64rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.sm-status { display: inline-flex; flex: 0 0 auto; align-items: center; padding: 4px 8px; border-radius: 999px; color: var(--color-primary); background: var(--color-secondary-tint); font-size: .62rem; font-weight: 800; }
+.sm-status-issued,.sm-status-accepted,.sm-status-passed,.sm-status-running { color: var(--color-success-text); background: var(--color-success-surface); }
+.sm-status-rejected,.sm-status-breakdown { color: var(--color-error); background: var(--color-error-surface); }
+.supervisor-material-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: 7px; }
+.supervisor-material-grid > div { display: grid; gap: 4px; padding: 9px; border-radius: 7px; background: var(--color-subtle); font-size: .7rem; }
+.supervisor-material-grid span { color: var(--color-muted); }
+.supervisor-inline-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 7px; }
+.supervisor-reason { display: grid; min-width: min(100%,250px); gap: 4px; color: var(--color-secondary-text); font-size: .66rem; font-weight: 700; }
+.supervisor-reason textarea { min-height: 37px; max-height: 100px; resize: vertical; }
+.admin-button.danger { color: #fff; background: var(--color-error); }
+.supervisor-machine-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,330px),1fr)); gap: 12px; }
+.supervisor-machine-card { display: grid; align-content: start; gap: 10px; }
+.supervisor-machine-card details { border-top: 1px solid var(--color-border); padding-top: 9px; }
+.supervisor-machine-card summary { color: var(--color-primary); cursor: pointer; font-size: .73rem; font-weight: 700; }
+.supervisor-machine-card .admin-form { margin-top: 10px; }
+.supervisor-form { margin-top: 10px; }
+.supervisor-form small { align-self: center; color: var(--color-muted); font-size: .68rem; }
+.supervisor-section { margin-top: 12px; }
+.supervisor-job-summary { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.supervisor-job-summary h2 { margin-top: 5px; }
+.supervisor-job-summary p { color: var(--color-muted); font-size: .75rem; }
+.supervisor-job-filter { display: grid; max-width: 550px; gap: 5px; color: var(--color-secondary-text); font-size: .7rem; font-weight: 700; }
+.supervisor-job-filter select { min-height: 38px; padding: 5px 8px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-surface); font: inherit; }
+.supervisor-quality-layout,.supervisor-breakdown-grid { display: grid; grid-template-columns: minmax(0,1.05fr) minmax(320px,.95fr); gap: 12px; align-items: start; }
+.supervisor-quality-layout > .admin-card,.supervisor-breakdown-grid > .admin-card { min-width: 0; }
+.supervisor-subheading { margin-top: 17px !important; padding-top: 13px; border-top: 1px solid var(--color-border); }
+.supervisor-link-button { padding: 0; border: 0; color: var(--color-info); background: transparent; cursor: pointer; font: inherit; font-weight: 700; text-decoration: underline; }
+.supervisor-state { color: var(--color-muted); font-size: .75rem; }
+.supervisor-timeline { display: grid; gap: 8px; margin: 13px 0; }
+.supervisor-timeline article { display: grid; gap: 4px; padding: 10px; border-left: 3px solid var(--color-primary); border-radius: 5px; background: var(--color-subtle); font-size: .7rem; }
+.supervisor-timeline time,.supervisor-timeline span,.supervisor-timeline p { color: var(--color-muted); }
+.supervisor-timeline p { margin: 2px 0; }
+.supervisor-inspection-form { grid-template-columns: repeat(2,minmax(0,1fr)); align-items: start; padding-top: 12px; border-top: 1px solid var(--color-border); }
+.supervisor-inspection-form > label textarea { min-height: 66px; }
+.supervisor-defects { grid-column: 1/-1; display: grid; gap: 8px; }
+.supervisor-defects h3 { margin: 0; color: var(--color-text); font-size: .8rem; }
+.supervisor-defect-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; padding: 9px; border: 1px solid var(--color-border); border-radius: 7px; }
+.supervisor-defect-row label { display: grid; gap: 4px; color: var(--color-secondary-text); font-size: .65rem; font-weight: 700; }
+.supervisor-defect-row input,.supervisor-defect-row select { min-width: 0; min-height: 34px; padding: 5px 7px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-text); background: var(--color-surface); font: inherit; }
+.supervisor-inspection-form > button { justify-self: start; }
+.supervisor-page .admin-form textarea { min-width: 0; }
+.supervisor-shift-edit { display: grid; min-width: 130px; gap: 4px; color: var(--color-secondary-text); font-size: .68rem; font-weight: 700; }
+.supervisor-shift-edit select { min-height: 34px; padding: 4px 7px; border: 1px solid var(--color-border); border-radius: 5px; color: var(--color-text); background: var(--color-surface); font: inherit; }
+@media (max-width: 900px) { .supervisor-quality-layout,.supervisor-breakdown-grid { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .supervisor-record-heading,.supervisor-job-summary { flex-direction: column; } .supervisor-inspection-form { grid-template-columns: 1fr; } .supervisor-defect-row { grid-template-columns: 1fr; } .supervisor-reason { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .supervisor-metric { transition: none; } }

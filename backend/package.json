@@ -12,6 +12,8 @@
     "dev": "node --watch server.js",
     "db:migrate": "node database/migrator/index.js",
     "seed:dev": "node scripts/seedDevStoreManager.js",
+    "seed:owner": "node scripts/seedDevOwner.js",
+    "seed:worker": "node scripts/seedDevWorker.js",
     "test": "node --test"
   },
   "dependencies": {

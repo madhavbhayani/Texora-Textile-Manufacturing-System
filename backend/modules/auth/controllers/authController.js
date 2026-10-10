@@ -77,11 +77,12 @@ async function logout(req, res, next) {
 async function changePassword(req, res, next) {
   try {
     const { currentPassword, newPassword, confirmPassword } = req.body || {};
-    if (typeof currentPassword !== 'string' || typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 72 || newPassword !== confirmPassword) {
-      throw new AppError(400, 'INVALID_PASSWORD_CHANGE', 'Enter your current password and a matching new password of at least 12 characters.');
+    if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 72 || newPassword !== confirmPassword) {
+      throw new AppError(400, 'INVALID_PASSWORD_CHANGE', 'Enter a matching new password of at least 12 characters.');
     }
     const result = await pool.query('SELECT password_hash FROM auth.users WHERE user_id = $1 AND is_active', [req.auth.userId]);
-    if (!result.rowCount || !await bcrypt.compare(currentPassword, result.rows[0].password_hash)) throw new AppError(400, 'CURRENT_PASSWORD_INVALID', 'Current password is incorrect.');
+    if (!result.rowCount) throw new AppError(401, 'INACTIVE_ACCOUNT', 'This account is no longer active.');
+    if (!req.auth.mustChangePassword && (typeof currentPassword !== 'string' || !await bcrypt.compare(currentPassword, result.rows[0].password_hash))) throw new AppError(400, 'CURRENT_PASSWORD_INVALID', 'Current password is incorrect.');
     const passwordHash = await bcrypt.hash(newPassword, Math.min(14, Math.max(10, Number(process.env.BCRYPT_ROUNDS || 12))));
     await pool.query('UPDATE auth.users SET password_hash = $2, must_change_password = false, password_changed_at = now(), failed_login_attempts = 0, locked_until = NULL WHERE user_id = $1', [req.auth.userId, passwordHash]);
     res.json({ success: true, message: 'Password updated successfully.' });

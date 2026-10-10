@@ -1,0 +1,16 @@
+'use strict';
+const express=require('express');
+const authenticate=require('../../auth/middleware/authenticate');
+const authorize=require('../../auth/middleware/authorize');
+const c=require('../controllers/workerController');
+const router=express.Router();
+router.use(authenticate,authorize('WORKER'));
+router.get('/dashboard',c.dashboard);
+router.get('/profile',c.profile);
+router.post('/attendance/check-in',c.checkIn);router.post('/attendance/check-out',c.checkOut);router.get('/attendance',c.attendance);router.get('/attendance/:attendanceId',c.attendanceDetail);
+router.get('/wages/summary',c.wageSummary);router.get('/wages',c.wages);router.get('/wages/:wagePaymentId',c.wageDetail);
+router.get('/jobs',c.jobs);router.get('/jobs/:jobId/progress',c.jobProgress);router.get('/jobs/:jobId',c.jobDetail);
+router.post('/machine-assignments/:assignmentId/start',c.start);router.post('/machine-assignments/:assignmentId/stop',c.stop);router.post('/machine-assignments/:assignmentId/complete',c.complete);
+router.get('/machines',c.machines);router.post('/machines/:machineId/report-breakdown',c.reportBreakdown);
+router.post('/production-logs',c.createLog);router.get('/production-logs',c.productionLogs);router.get('/production-logs/:productionLogId',c.productionLogDetail);
+module.exports=router;

@@ -43,14 +43,14 @@ test('Supervisor worker provisioning creates a hashed WORKER login and assigns a
    if(sql.includes('SELECT shift_id FROM master.shifts'))return {rowCount:1,rows:[{shift_id:'3'}]};
    if(sql.includes('SELECT 1 FROM auth.users'))return {rowCount:0,rows:[]};
    if(sql.includes("role_code='WORKER'"))return {rowCount:1,rows:[{role_id:'6'}]};
-   if(sql.includes('INSERT INTO auth.users'))return {rowCount:1,rows:[{user_id:'91',full_name:'Worker Example',email:null,phone:'+919876543210'}]};
+   if(sql.includes('INSERT INTO auth.users'))return {rowCount:1,rows:[{user_id:'91',full_name:'Worker Example',email:'worker@example.com',phone:'+919876543210'}]};
    if(sql.includes('INSERT INTO hr.workers'))return {rowCount:1,rows:[{worker_id:'12',employee_code:'EMP-0012',designation:'Weaver',skill_stage:'WEAVING',default_shift_id:'3'}]};
    if(sql.includes('SELECT shift_name FROM master.shifts'))return {rowCount:1,rows:[{shift_name:'Day'}]};
    return {rowCount:1,rows:[]};},release(){released=true;}});
- const result=await service.createWorker('481',{fullName:'Worker Example',phone:'+91 98765 43210',skillStage:'WEAVING',designation:'Weaver',shiftId:'3'});
+ const result=await service.createWorker('481',{fullName:'Worker Example',email:'worker@example.com',phone:'+91 98765 43210',skillStage:'WEAVING',designation:'Weaver',shiftId:'3'});
  const actorCall=calls.find(call=>call.sql.includes("set_config('app.current_user_id'"));assert.equal(actorCall.args[0],'481');
  const userInsert=calls.find(call=>call.sql.includes('INSERT INTO auth.users'));assert.match(userInsert.sql,/must_change_password/);assert.equal(userInsert.args[0],'6');assert.equal(userInsert.args[3],'+919876543210');
- assert.equal(result.worker.worker_id,'12');assert.equal(result.worker.email,null);assert.ok(result.temporaryPassword.length>=20);assert.equal(released,true);
+ assert.equal(result.worker.worker_id,'12');assert.equal(result.worker.email,'worker@example.com');assert.ok(result.temporaryPassword.length>=20);assert.equal(released,true);
 });
 
 test('QC defect failure rolls back inspection and releases its transaction client',async()=>{

@@ -54,3 +54,15 @@
   .signup-card { padding: 20px 18px; }
 }
 @media (max-width: 360px) { .auth-page { padding-inline: 10px; } .auth-card { padding-inline: 16px; } .form-options { align-items: flex-start; flex-direction: column; } }
+
+.password-change-card { max-width:480px; }
+.password-change-card .auth-intro { margin:18px 0 20px; }
+.password-change-badge { display:inline-flex; align-items:center; gap:7px; margin-top:22px; padding:6px 9px; border-radius:999px; color:var(--color-primary); background:var(--color-secondary-tint); font-size:.72rem; font-weight:800; }
+.password-change-field > span { color:var(--color-secondary-text); font-size:.8125rem; font-weight:700; }
+.password-change-field > small { color:var(--color-muted); font-size:.72rem; line-height:1.5; }
+.password-change-field .password-wrap input { width:100%; min-height:var(--input-height); padding:0 44px 0 13px; border:1px solid var(--color-border); border-radius:var(--radius-small); color:var(--color-text); background:var(--color-surface); font:inherit; font-size:.875rem; }
+.password-change-field .password-wrap input:focus-visible { outline:3px solid var(--color-focus); border-color:var(--color-primary); }
+.password-change-note { display:flex; align-items:flex-start; gap:7px; margin:16px 0 0; color:var(--color-muted); font-size:.7rem; line-height:1.5; }
+.password-change-note svg { flex:0 0 auto; margin-top:1px; }
+.form-success { display:flex; align-items:center; gap:7px; }
+@media (max-width:540px) { .password-change-card { margin-block:auto; } }

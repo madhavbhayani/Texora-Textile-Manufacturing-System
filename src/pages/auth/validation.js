@@ -1,8 +1,9 @@
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function validateLogin(values) {
   const errors = {};
-  if (!values.email.trim()) errors.email = 'Enter your email address.';
-  else if (!emailPattern.test(values.email.trim())) errors.email = 'Enter a valid email address.';
+  const identifier = values.email.trim();
+  if (!identifier) errors.email = 'Enter your email address or phone number.';
+  else if (identifier.includes('@') ? !emailPattern.test(identifier) : !/^\+?[0-9]{10,15}$/.test(identifier.replace(/[\s().-]/g, ''))) errors.email = 'Enter a valid email address or phone number.';
   if (!values.password) errors.password = 'Enter your password.';
   return errors;
 }

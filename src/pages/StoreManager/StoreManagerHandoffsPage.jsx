@@ -19,50 +19,32 @@ export default function StoreManagerHandoffsPage() {
   const [issuingId, setIssuingId] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [search, setSearch] = useState('');
+  const [hasMore, setHasMore] = useState({orders:false,handoffs:false});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
+      const query = new URLSearchParams({limit:'20',offset:String(offset)}); if(search.trim()) query.set('search',search.trim());
       const [o, s, h] = await Promise.all([
-        authenticatedRequest('/store-manager/supervisor-handoffs/orders'),
+        authenticatedRequest(`/store-manager/supervisor-handoffs/orders?${query}`),
         authenticatedRequest('/store-manager/supervisors'),
-        authenticatedRequest('/store-manager/supervisor-handoffs'),
+        authenticatedRequest(`/store-manager/supervisor-handoffs?${query}`),
       ]);
       setOrders(o.orders || []);
       setSupervisors(s.supervisors || []);
       setHandoffs(h.handoffs || []);
+      setHasMore({orders:(o.orders||[]).length===20,handoffs:(h.handoffs||[]).length===20});
     } catch (e) {
       setError(e.message || 'Could not load customer orders and handoffs.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [offset,search]);
 
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const [o, s, h] = await Promise.all([
-          authenticatedRequest('/store-manager/supervisor-handoffs/orders'),
-          authenticatedRequest('/store-manager/supervisors'),
-          authenticatedRequest('/store-manager/supervisor-handoffs'),
-        ]);
-        if (active) {
-          setOrders(o.orders || []);
-          setSupervisors(s.supervisors || []);
-          setHandoffs(h.handoffs || []);
-        }
-      } catch (e) {
-        if (active) setError(e.message || 'Could not load customer orders and handoffs.');
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+  useEffect(() => { load(); }, [load]);
 
   const selected = orders.find((order) => String(order.order_item_id) === selectedId);
 
@@ -170,6 +152,7 @@ export default function StoreManagerHandoffsPage() {
       </header>
       {error && <div className="admin-alert" role="alert">{error}</div>}
       {notice && <div className="sm-notice" role="status"><Check size={14} /> {notice}</div>}
+      <div className="admin-toolbar sm-handoff-list-toolbar"><input value={search} onChange={event=>{setOffset(0);setSearch(event.target.value);}} placeholder="Search customer orders and handoffs" aria-label="Search customer orders and handoffs"/><div className="admin-pager"><button className="admin-button secondary" type="button" disabled={offset===0||loading} onClick={()=>setOffset(Math.max(0,offset-20))}>Previous</button><span>{offset+1}–{Math.max(offset+orders.length,offset+handoffs.length)} shown</span><button className="admin-button secondary" type="button" disabled={!(hasMore.orders||hasMore.handoffs)||loading} onClick={()=>setOffset(offset+20)}>Next</button></div></div>
       <section className="admin-card sm-form-card">
         <h2>Route customer order</h2>
         {loading ? (

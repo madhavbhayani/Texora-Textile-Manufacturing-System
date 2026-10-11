@@ -61,3 +61,5 @@
 @media (max-width: 900px) { .supervisor-quality-layout,.supervisor-breakdown-grid { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .supervisor-record-heading,.supervisor-job-summary { flex-direction: column; } .supervisor-inspection-form { grid-template-columns: 1fr; } .supervisor-defect-row { grid-template-columns: 1fr; } .supervisor-reason { width: 100%; } }
 @media (prefers-reduced-motion: reduce) { .supervisor-metric { transition: none; } }
+.supervisor-list-toolbar { margin: 8px 0 12px; }
+@media (max-width: 600px) { .supervisor-list-toolbar { align-items: stretch; flex-direction: column; } .supervisor-list-toolbar .admin-pager { justify-content: space-between; } }

@@ -2,9 +2,10 @@
 const AppError = require('../../../shared/errors/AppError');
 const fail = (message) => { throw new AppError(400, 'VALIDATION_ERROR', message); };
 function id(value, label = 'ID') { if (!/^[1-9]\d*$/.test(String(value ?? ''))) fail(`${label} must be a valid ID.`); return String(value); }
-function page(query = {}) { const limit = Number(query.limit ?? 25); const offset = Number(query.offset ?? 0); if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 100000) fail('Pagination must use a limit from 1 to 100 and a nonnegative offset.'); return { limit, offset }; }
+function page(query = {}) { const limit = Number(query.limit ?? 20); const offset = Number(query.offset ?? 0); if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 100000) fail('Pagination must use a limit from 1 to 100 and a nonnegative offset.'); return { limit, offset }; }
 function filters(query = {}, kind) {
   const parsed = {};
+  if (query.search != null) parsed.search = String(query.search).trim().slice(0, 100);
   if (query.from != null || query.to != null) {
     for (const field of ['from','to']) if (query[field] != null) { const value=String(query[field]); const date=new Date(`${value}T00:00:00Z`); if (!/^\d{4}-\d{2}-\d{2}$/.test(value)||Number.isNaN(date.getTime())||date.toISOString().slice(0,10)!==value) fail(`${field} must be a valid YYYY-MM-DD date.`); parsed[field]=value; }
     if (parsed.from && parsed.to && parsed.from > parsed.to) fail('The from date must not be after the to date.');

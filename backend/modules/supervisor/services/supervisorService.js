@@ -92,7 +92,8 @@ async function dashboard(userId) {
 async function handoffs(userId, query = {}) {
   const params = [userId]; const where = ['h.supervisor_user_id=$1'];
   if (query.status) { params.push(String(query.status)); where.push(`h.status=$${params.length}`); }
-  params.push(Math.min(Math.max(Number(query.limit)||50,1),100), Math.max(Number(query.offset)||0,0));
+  if(query.search){params.push(`%${String(query.search).trim().slice(0,100)}%`);const n=params.length;where.push(`(h.handoff_no ILIKE $${n} OR o.order_no ILIKE $${n} OR b.company_name ILIKE $${n} OR ft.fabric_name ILIKE $${n})`);}
+  params.push(Math.min(Math.max(Number(query.limit)||20,1),100), Math.max(Number(query.offset)||0,0));
   return (await pool.query(`SELECT h.*,o.order_no,o.status AS order_status,b.company_name,oi.quantity_m,oi.colour_id,ft.fabric_name,c.colour_name,j.job_no,
       creator.full_name AS created_by_name,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('yarn_type_id',hm.yarn_type_id,'yarn_name',yt.yarn_name,'required_kg',hm.required_kg,'reserved_kg',hm.reserved_kg,'issued_kg',hm.issued_kg))
@@ -152,7 +153,7 @@ async function createJob(userId,handoffId) {
 async function jobs(userId,query={}) {
   const params=[userId]; const where=[`EXISTS(SELECT 1 FROM production.store_handoffs h WHERE h.production_job_id=e.job_id AND h.supervisor_user_id=$1)`];
   if(query.status){params.push(query.status);where.push(`e.job_status=$${params.length}`);} if(query.stage){params.push(query.stage);where.push(`e.stage=$${params.length}`);} if(query.search){params.push(`%${String(query.search).slice(0,100)}%`);where.push(`(e.job_no ILIKE $${params.length} OR e.order_no ILIKE $${params.length} OR e.fabric_name ILIKE $${params.length})`);}
-  params.push(Math.min(Math.max(Number(query.limit)||50,1),100),Math.max(Number(query.offset)||0,0));
+  params.push(Math.min(Math.max(Number(query.limit)||20,1),100),Math.max(Number(query.offset)||0,0));
   return (await pool.query(`${jobSelect} WHERE ${where.join(' AND ')} ORDER BY e.job_id DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params)).rows;
 }
 async function job(userId,jobId) {
@@ -239,12 +240,14 @@ async function assignMachine(userId,jobId,input) {
  });
 }
 
-async function workers(stage) {
+async function workers(query={}) {
+ const stage=query.stage||null,search=String(query.search||'').trim().slice(0,100),limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);
  return (await pool.query(`SELECT w.worker_id,w.employee_code,w.designation,w.skill_stage,w.default_shift_id,s.shift_name AS default_shift_name,u.full_name,u.email,u.phone,
    EXISTS(SELECT 1 FROM production.job_worker_assignments a WHERE a.worker_id=w.worker_id AND a.ended_at IS NULL) AS assigned
    FROM hr.workers w JOIN auth.users u USING(user_id) JOIN auth.roles r USING(role_id) LEFT JOIN master.shifts s ON s.shift_id=w.default_shift_id
    WHERE w.is_active AND u.is_active AND r.role_code='WORKER' AND r.is_active AND ($1::text IS NULL OR w.skill_stage IS NULL OR w.skill_stage=$1)
-   ORDER BY w.employee_code`,[stage||null])).rows;
+   AND ($2::text='' OR w.employee_code ILIKE $3 OR u.full_name ILIKE $3 OR COALESCE(u.email,'') ILIKE $3 OR COALESCE(u.phone,'') ILIKE $3 OR w.designation ILIKE $3)
+   ORDER BY w.employee_code LIMIT $4 OFFSET $5`,[stage,search,`%${search}%`,limit,offset])).rows;
 }
 async function shifts() { return (await pool.query(`SELECT shift_id,shift_name,start_time,end_time FROM master.shifts WHERE is_active ORDER BY start_time`)).rows; }
 async function createWorker(userId,input) {
@@ -301,7 +304,31 @@ async function unassignWorker(userId,workerAssignmentId) {
  });
 }
 
-async function machines() {
+async function cancelMachineAssignment(userId,assignmentId) {
+ return transaction(async(client)=>{
+  await actor(client,userId);
+  const assignment=await client.query(`SELECT ma.machine_assignment_id,ma.job_id,ma.status
+    FROM production.machine_assignments ma
+    JOIN production.jobs j ON j.job_id=ma.job_id
+    JOIN production.store_handoffs h ON h.production_job_id=j.job_id
+    WHERE ma.machine_assignment_id=$1 AND h.supervisor_user_id=$2
+    FOR UPDATE OF ma,j,h`,[id(assignmentId,'Machine assignment'),userId]);
+  if(!assignment.rowCount)notFound('Active machine assignment');
+  const row=assignment.rows[0];
+  if(!['ASSIGNED','PAUSED'].includes(row.status)){
+   if(row.status==='RUNNING')fail(409,'MACHINE_RUNNING','Pause or stop the running machine before removing its assignment.');
+   fail(409,'ASSIGNMENT_NOT_ACTIVE','This machine assignment is no longer active. Refresh and try again.');
+  }
+  await client.query(`UPDATE production.job_worker_assignments SET ended_at=COALESCE(ended_at,now()) WHERE machine_assignment_id=$1 AND ended_at IS NULL`,[row.machine_assignment_id]);
+  return (await client.query(`UPDATE production.machine_assignments
+    SET status='CANCELLED',ended_at=COALESCE(ended_at,now()),ended_by=$2
+    WHERE machine_assignment_id=$1 AND status IN('ASSIGNED','PAUSED')
+    RETURNING machine_assignment_id,status,ended_at`,[row.machine_assignment_id,userId])).rows[0];
+ });
+}
+
+async function machines(query={}) {
+ const search=String(query.search||'').trim().slice(0,100),limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);
  return (await pool.query(`SELECT m.machine_id,m.machine_code,m.machine_name,m.stage,m.status,m.location,m.capacity_per_hour,
   ma.machine_assignment_id,ma.status AS assignment_status,ma.assigned_at,ma.started_at AS assignment_started_at,sh.shift_name,
   j.job_id,j.job_no,j.status AS job_status,e.order_no,e.company_name,e.fabric_name,
@@ -312,7 +339,8 @@ async function machines() {
   COALESCE((SELECT jsonb_agg(jsonb_build_object('old_status',ev.old_status,'new_status',ev.new_status,'reason',ev.reason,'started_at',ev.started_at,'ended_at',ev.ended_at) ORDER BY ev.started_at DESC) FROM production.machine_status_events ev WHERE ev.machine_id=m.machine_id),'[]'::jsonb) status_history
   FROM master.machines m LEFT JOIN production.machine_assignments ma ON ma.machine_id=m.machine_id AND ma.status IN('ASSIGNED','RUNNING','PAUSED')
   LEFT JOIN production.jobs j ON j.job_id=ma.job_id LEFT JOIN master.shifts sh ON sh.shift_id=ma.shift_id LEFT JOIN reporting.production_job_efficiency e ON e.job_id=j.job_id
-  WHERE m.is_active ORDER BY m.machine_code`)).rows;
+  WHERE m.is_active AND ($1::text='' OR m.machine_code ILIKE $2 OR m.machine_name ILIKE $2 OR m.stage ILIKE $2 OR COALESCE(j.job_no,'') ILIKE $2)
+  ORDER BY m.machine_code LIMIT $3 OFFSET $4`,[search,`%${search}%`,limit,offset])).rows;
 }
 async function createMachine(userId,input) {
  const name=String(input.machineName||'').trim();
@@ -345,12 +373,12 @@ async function statusEvent(userId,machineId,input) {
  if(['BREAKDOWN','MAINTENANCE'].includes(status)){await client.query(`INSERT INTO notification.user_notifications(recipient_role_code,category,title,message,entity_type,entity_id) SELECT 'STORE_MANAGER','PRODUCTION','Machine unavailable',$1,'MACHINE',$2`,[`Machine ${m.rows[0].machine_id} was reported ${status.toLowerCase()}: ${why}`,machineId]);}
  return event.rows[0];});
 }
-async function breakdowns() {return (await pool.query(`SELECT m.machine_id,m.machine_code,m.machine_name,m.stage,m.status,e.machine_status_event_id,e.reason,e.started_at,e.reported_by,u.full_name AS reported_by_name,j.job_no,e2.order_no,
+async function breakdowns(query={}) {const search=String(query.search||'').trim().slice(0,100),limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);return (await pool.query(`SELECT m.machine_id,m.machine_code,m.machine_name,m.stage,m.status,e.machine_status_event_id,e.reason,e.started_at,e.reported_by,u.full_name AS reported_by_name,j.job_no,e2.order_no,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('worker_id',w.worker_id,'name',au.full_name)) FROM production.job_worker_assignments jwa JOIN hr.workers w USING(worker_id) JOIN auth.users au USING(user_id) WHERE jwa.machine_assignment_id=ma.machine_assignment_id AND jwa.ended_at IS NULL),'[]'::jsonb) workers
   FROM master.machines m JOIN LATERAL(SELECT * FROM production.machine_status_events x WHERE x.machine_id=m.machine_id AND x.ended_at IS NULL ORDER BY x.started_at DESC LIMIT 1)e ON true
   LEFT JOIN production.machine_assignments ma ON ma.machine_id=m.machine_id AND ma.status IN('ASSIGNED','RUNNING','PAUSED') LEFT JOIN production.jobs j ON j.job_id=ma.job_id LEFT JOIN reporting.production_job_efficiency e2 ON e2.job_id=j.job_id LEFT JOIN auth.users u ON u.user_id=e.reported_by
-  WHERE m.status IN('BREAKDOWN','MAINTENANCE') ORDER BY e.started_at DESC`)).rows;}
-async function logs(userId,jobId) { const result=await pool.query(`SELECT pl.*,w.employee_code,u.full_name AS worker_name,ma.machine_id,m.machine_name,sh.shift_name FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id JOIN hr.workers w USING(worker_id) JOIN auth.users u USING(user_id) JOIN master.machines m USING(machine_id) JOIN master.shifts sh ON sh.shift_id=pl.shift_id WHERE j.job_id=$1 AND h.supervisor_user_id=$2 ORDER BY pl.logged_at DESC`,[id(jobId,'Job'),userId]);return result.rows; }
+  WHERE m.status IN('BREAKDOWN','MAINTENANCE') AND ($1::text='' OR m.machine_code ILIKE $2 OR m.machine_name ILIKE $2 OR COALESCE(j.job_no,'') ILIKE $2) ORDER BY e.started_at DESC LIMIT $3 OFFSET $4`,[search,`%${search}%`,limit,offset])).rows;}
+async function logs(userId,jobId,query={}) { const search=String(query.search||'').trim().slice(0,100),limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);const result=await pool.query(`SELECT pl.*,w.employee_code,u.full_name AS worker_name,ma.machine_id,m.machine_name,sh.shift_name FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id JOIN hr.workers w USING(worker_id) JOIN auth.users u USING(user_id) JOIN master.machines m USING(machine_id) JOIN master.shifts sh ON sh.shift_id=pl.shift_id WHERE j.job_id=$1 AND h.supervisor_user_id=$2 AND ($3::text='' OR w.employee_code ILIKE $4 OR u.full_name ILIKE $4 OR m.machine_name ILIKE $4 OR COALESCE(pl.remarks,'') ILIKE $4) ORDER BY pl.logged_at DESC LIMIT $5 OFFSET $6`,[id(jobId,'Job'),userId,search,`%${search}%`,limit,offset]);return result.rows; }
 
 async function rolls(userId,query={}) {
  const states=query.state==='rework'?['REWORK']:query.state==='rejected'?['REJECTED']:query.state==='pending'?['PENDING_QC','REWORK']:['PENDING_QC','REWORK','PASSED','REJECTED'];
@@ -359,7 +387,7 @@ async function rolls(userId,query={}) {
   COALESCE((SELECT jsonb_agg(jsonb_build_object('defect_name',d.defect_name,'severity',x.severity,'defect_count',x.defect_count,'notes',x.notes)) FROM quality.inspection_defects x JOIN master.defect_types d USING(defect_type_id) WHERE x.inspection_id=latest.inspection_id),'[]'::jsonb) defects
   FROM production.rolls r JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id JOIN sales.order_items oi ON oi.order_item_id=r.order_item_id JOIN sales.orders o USING(order_id) JOIN master.buyers b USING(buyer_id) JOIN master.fabric_types ft USING(fabric_type_id) LEFT JOIN master.colours c USING(colour_id) LEFT JOIN production.production_logs pl ON pl.production_log_id=r.production_log_id LEFT JOIN production.machine_assignments ma ON ma.machine_assignment_id=pl.machine_assignment_id LEFT JOIN master.machines m ON m.machine_id=COALESCE(r.machine_id,ma.machine_id) LEFT JOIN master.shifts sh ON sh.shift_id=r.shift_id LEFT JOIN hr.workers w ON w.worker_id=r.produced_by_worker_id LEFT JOIN auth.users wu ON wu.user_id=w.user_id
   LEFT JOIN LATERAL(SELECT qi.* FROM quality.inspections qi WHERE qi.roll_id=r.roll_id ORDER BY qi.inspected_at DESC,qi.inspection_id DESC LIMIT 1)latest ON true
-  WHERE h.supervisor_user_id=$1 AND r.current_status=ANY($2::text[]) ORDER BY r.produced_at DESC LIMIT $3 OFFSET $4`,[userId,states,Math.min(Math.max(Number(query.limit)||50,1),100),Math.max(Number(query.offset)||0,0)])).rows;
+  WHERE h.supervisor_user_id=$1 AND r.current_status=ANY($2::text[]) AND ($3::text='' OR r.roll_no ILIKE $4 OR e.job_no ILIKE $4 OR e.order_no ILIKE $4 OR b.company_name ILIKE $4 OR ft.fabric_name ILIKE $4 OR wu.full_name ILIKE $4) ORDER BY r.produced_at DESC LIMIT $5 OFFSET $6`,[userId,states,String(query.search||'').trim().slice(0,100),`%${String(query.search||'').trim().slice(0,100)}%`,Math.min(Math.max(Number(query.limit)||20,1),100),Math.max(Number(query.offset)||0,0)])).rows;
 }
 async function createRoll(userId,input) {
  const length=Number(input.lengthMeters), weight=input.weightKg==null||input.weightKg===''?null:Number(input.weightKg); if(!Number.isFinite(length)||length<=0)fail(400,'VALIDATION_ERROR','Roll length must be greater than zero.');if(weight!==null&&(!Number.isFinite(weight)||weight<=0))fail(400,'VALIDATION_ERROR','Roll weight must be greater than zero.');
@@ -410,12 +438,13 @@ async function inspectRoll(userId,rollId,input) {
   return {...inspection.rows[0],defects,replacementRequest};
  });
 }
-async function inspections(userId,query={}) {return (await pool.query(`SELECT i.inspection_id,i.inspection_no,i.result,i.inspected_at,i.reason,i.rework_instructions,r.roll_id,r.roll_no,r.length_meters,e.job_no,e.order_no,e.fabric_name,u.full_name AS inspector_name FROM quality.inspections i JOIN production.rolls r USING(roll_id) JOIN reporting.production_job_efficiency e USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=r.job_id JOIN auth.users u ON u.user_id=i.inspected_by WHERE h.supervisor_user_id=$1 ORDER BY i.inspected_at DESC LIMIT $2 OFFSET $3`,[userId,Math.min(Math.max(Number(query.limit)||50,1),100),Math.max(Number(query.offset)||0,0)])).rows;}
+async function inspections(userId,query={}) {const search=String(query.search||'').trim().slice(0,100),limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);return (await pool.query(`SELECT i.inspection_id,i.inspection_no,i.result,i.inspected_at,i.reason,i.rework_instructions,r.roll_id,r.roll_no,r.length_meters,e.job_no,e.order_no,e.fabric_name,u.full_name AS inspector_name FROM quality.inspections i JOIN production.rolls r USING(roll_id) JOIN reporting.production_job_efficiency e USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=r.job_id JOIN auth.users u ON u.user_id=i.inspected_by WHERE h.supervisor_user_id=$1 AND ($2::text='' OR i.inspection_no ILIKE $3 OR r.roll_no ILIKE $3 OR e.job_no ILIKE $3 OR e.order_no ILIKE $3 OR e.fabric_name ILIKE $3 OR u.full_name ILIKE $3) ORDER BY i.inspected_at DESC LIMIT $4 OFFSET $5`,[userId,search,`%${search}%`,limit,offset])).rows;}
 async function inspectionDetail(userId,inspectionId) {const found=await pool.query(`SELECT i.*,r.roll_id,r.roll_no,r.length_meters,e.job_no,e.order_no,e.fabric_name,e.colour_name,u.full_name AS inspector_name FROM quality.inspections i JOIN production.rolls r USING(roll_id) JOIN reporting.production_job_efficiency e USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=r.job_id JOIN auth.users u ON u.user_id=i.inspected_by WHERE i.inspection_id=$1 AND h.supervisor_user_id=$2`,[id(inspectionId,'Inspection'),userId]);if(!found.rowCount)notFound('Inspection');const defects=await pool.query(`SELECT d.*,t.defect_name FROM quality.inspection_defects d JOIN master.defect_types t USING(defect_type_id) WHERE d.inspection_id=$1 ORDER BY t.defect_name`,[inspectionId]);return {...found.rows[0],defects:defects.rows};}
 
 async function report(userId,kind,query={}) {
  const from=String(query.from||new Date().toISOString().slice(0,10)),to=String(query.to||from);const valid=/^\d{4}-\d{2}-\d{2}$/;
  if(!valid.test(from)||!valid.test(to)||from>to)fail(400,'VALIDATION_ERROR','Use a valid date range with from on or before to.');
+ const search=String(query.search||'').trim().slice(0,100),like=`%${search}%`,limit=Math.min(Math.max(Number(query.limit)||20,1),100),offset=Math.max(Number(query.offset)||0,0);
  if(kind==='production')return (await pool.query(`WITH period_logs AS (
     SELECT ma.job_id,sum(pl.good_meters) produced_meters,sum(pl.waste_meters) waste_meters,sum(pl.downtime_minutes) downtime_minutes
     FROM production.production_logs pl JOIN production.machine_assignments ma USING(machine_assignment_id)
@@ -432,10 +461,10 @@ async function report(userId,kind,query={}) {
       round(COALESCE(q.qc_passed_meters,0)/NULLIF(l.produced_meters,0)*100,2) qc_yield_percent
     FROM reporting.production_job_efficiency e LEFT JOIN period_logs l USING(job_id) LEFT JOIN period_qc q USING(job_id)
     WHERE EXISTS(SELECT 1 FROM production.store_handoffs h WHERE h.production_job_id=e.job_id AND h.supervisor_user_id=$1)
-      AND (l.job_id IS NOT NULL OR q.job_id IS NOT NULL) ORDER BY e.job_no`,[userId,from,to])).rows;
- if(kind==='quality')return (await pool.query(`SELECT r.current_status,count(*)::int AS rolls,COALESCE(sum(r.length_meters),0) meters FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE h.supervisor_user_id=$1 AND r.produced_at::date BETWEEN $2::date AND $3::date GROUP BY r.current_status ORDER BY r.current_status`,[userId,from,to])).rows;
- if(kind==='machines')return (await pool.query(`SELECT m.machine_code,m.machine_name,m.stage,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM master.machines m JOIN production.machine_assignments ma USING(machine_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY m.machine_id ORDER BY m.machine_code`,[userId,from,to])).rows;
- return (await pool.query(`SELECT w.employee_code,u.full_name,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM hr.workers w JOIN auth.users u USING(user_id) JOIN production.job_worker_assignments jwa USING(worker_id) JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.worker_id=w.worker_id AND pl.logged_at::date BETWEEN $2::date AND $3::date GROUP BY w.worker_id,u.full_name ORDER BY produced_meters DESC,w.employee_code`,[userId,from,to])).rows;
+      AND (l.job_id IS NOT NULL OR q.job_id IS NOT NULL) AND ($4::text='' OR e.job_no ILIKE $5 OR e.order_no ILIKE $5 OR e.company_name ILIKE $5 OR e.fabric_name ILIKE $5) ORDER BY e.job_no LIMIT $6 OFFSET $7`,[userId,from,to,search,like,limit,offset])).rows;
+ if(kind==='quality')return (await pool.query(`SELECT r.current_status,count(*)::int AS rolls,COALESCE(sum(r.length_meters),0) meters FROM production.rolls r JOIN production.store_handoffs h ON h.production_job_id=r.job_id WHERE h.supervisor_user_id=$1 AND r.produced_at::date BETWEEN $2::date AND $3::date AND ($4::text='' OR r.current_status ILIKE $5) GROUP BY r.current_status ORDER BY r.current_status LIMIT $6 OFFSET $7`,[userId,from,to,search,like,limit,offset])).rows;
+ if(kind==='machines')return (await pool.query(`SELECT m.machine_code,m.machine_name,m.stage,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM master.machines m JOIN production.machine_assignments ma USING(machine_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.logged_at::date BETWEEN $2::date AND $3::date WHERE ($4::text='' OR m.machine_code ILIKE $5 OR m.machine_name ILIKE $5 OR m.stage ILIKE $5) GROUP BY m.machine_id ORDER BY m.machine_code LIMIT $6 OFFSET $7`,[userId,from,to,search,like,limit,offset])).rows;
+ return (await pool.query(`SELECT w.employee_code,u.full_name,COALESCE(sum(pl.good_meters),0) produced_meters,COALESCE(sum(pl.waste_meters),0) waste_meters,COALESCE(sum(pl.downtime_minutes),0) downtime_minutes FROM hr.workers w JOIN auth.users u USING(user_id) JOIN production.job_worker_assignments jwa USING(worker_id) JOIN production.machine_assignments ma USING(machine_assignment_id) JOIN production.jobs j USING(job_id) JOIN production.store_handoffs h ON h.production_job_id=j.job_id AND h.supervisor_user_id=$1 LEFT JOIN production.production_logs pl ON pl.machine_assignment_id=ma.machine_assignment_id AND pl.worker_id=w.worker_id AND pl.logged_at::date BETWEEN $2::date AND $3::date WHERE ($4::text='' OR w.employee_code ILIKE $5 OR u.full_name ILIKE $5) GROUP BY w.worker_id,u.full_name ORDER BY produced_meters DESC,w.employee_code LIMIT $6 OFFSET $7`,[userId,from,to,search,like,limit,offset])).rows;
 }
 
-module.exports={dashboard,handoffs,handoff,transitionHandoff,createJob,jobs,job,assignMachine,workers,createWorker,updateWorkerShift,shifts,assignWorker,unassignWorker,machines,createMachine,machine,machineHistory,statusEvent,breakdowns,logs,rolls,createRoll,qualityPending,rollDetail,defectTypes,inspectRoll,inspections,inspectionDetail,report};
+module.exports={dashboard,handoffs,handoff,transitionHandoff,createJob,jobs,job,assignMachine,workers,createWorker,updateWorkerShift,shifts,assignWorker,unassignWorker,cancelMachineAssignment,machines,createMachine,machine,machineHistory,statusEvent,breakdowns,logs,rolls,createRoll,qualityPending,rollDetail,defectTypes,inspectRoll,inspections,inspectionDetail,report};

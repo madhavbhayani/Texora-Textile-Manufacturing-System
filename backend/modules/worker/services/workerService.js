@@ -373,6 +373,7 @@ async function deleteProductionLog(userId,logId){
     if(['COMPLETED','CANCELLED'].includes(log.assignment_status)||['COMPLETED','CANCELLED'].includes(log.job_status)){
       throw new AppError(409,'PRODUCTION_LOG_LOCKED','Production history cannot be deleted after its assignment or job is closed.');
     }
+    const rolls=await client.query(`SELECT roll_id,current_status FROM production.rolls WHERE production_log_id=$1 FOR UPDATE`,[id]);
     const protectedRecords=await client.query(`SELECT
       EXISTS(SELECT 1 FROM production.rolls r WHERE r.production_log_id=$1 AND r.current_status<>'PENDING_QC') AS processed_roll,
       EXISTS(SELECT 1 FROM quality.inspections i JOIN production.rolls r USING(roll_id) WHERE r.production_log_id=$1) AS inspected_roll,
@@ -383,7 +384,6 @@ async function deleteProductionLog(userId,logId){
     if(Object.values(protectedRecords.rows[0]).some(Boolean)){
       throw new AppError(409,'PRODUCTION_LOG_LOCKED','This log is connected to quality, rework, dispatch, or replacement records and cannot be deleted.');
     }
-    const rolls=await client.query(`SELECT roll_id FROM production.rolls WHERE production_log_id=$1 FOR UPDATE`,[id]);
     await client.query(`INSERT INTO audit.change_log(actor_user_id,action,schema_name,table_name,record_key,old_data)
       VALUES($1,'DELETE','production','production_logs',$2,$3::jsonb)`,[userId,String(id),JSON.stringify(log)]);
     await client.query(`DELETE FROM production.rolls WHERE production_log_id=$1`,[id]);

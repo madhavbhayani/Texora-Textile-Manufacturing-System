@@ -68,7 +68,7 @@ The customer UI is available at `/customer`. It loads its catalogue from the API
 
 Access tokens are returned in the response and held in frontend memory; they are not persisted in browser storage. Refresh tokens are opaque, rotated, stored only as SHA-256 hashes in `auth.sessions`, and sent as `HttpOnly` cookies. Refresh/logout require the CSRF token supplied by login/signup or `GET /api/auth/csrf`. Configure `CORS_ORIGIN` as an exact comma-separated allowlist. For cross-site frontend/API deployments, use HTTPS with `COOKIE_SECURE=true` and `COOKIE_SAME_SITE=none`; browser cookie and CORS credential settings must both allow the specific frontend origin.
 
-Tests run without a database using Node's test runner (`cd backend && npm test`). Database migration and end-to-end auth tests require a separate disposable PostgreSQL test database; they have not been run against the database configured in the local `.env`.
+Tests run without a database using Node's test runner (`cd backend && npm test`). Database migration and end-to-end auth tests require a separate disposable PostgreSQL test database. The additive Owner invoice review migration was applied to the configured local database with the normal migrator; no database integration tests were run.
 # Internal Store Manager workspace
 
 The Store Manager workspace is available at `/store-manager` after signing in with an active `STORE_MANAGER` or `OWNER` account. Its APIs are mounted under `/api/store-manager`; role checks are enforced by the backend.
@@ -86,3 +86,50 @@ npm run seed:dev
 This creates `storemanager@gmail.com` with temporary password `admin123`; the account must change that password on first sign-in. The seed refuses to run unless both development safeguards are enabled, and it refuses to change an existing account with a different role. Never enable this seed in production.
 
 Start the API with `npm run dev` from `backend/` and the frontend with `npm run dev` from the repository root. The customer portal and its routes remain available.
+
+# Worker workspace
+
+Workers sign in through the existing login page and use the shared internal layout at `/worker`. The workspace includes overview, attendance, assigned jobs, machine operations, production logs, wage statements and profile views. Worker APIs are mounted at `/api/worker` and require an active `WORKER` session; record ownership is always resolved from the authenticated account. Machine start, pause and completion call the existing PostgreSQL production routines. Worker log retries are idempotent after migration `011_worker_production_log_idempotency.sql`; explicit Supervisor unassignments are tracked separately from pauses after migration `012_worker_assignment_release_marker.sql`.
+
+Apply pending migrations with `npm run db:migrate` from `backend/` (or start the backend, which runs migrations at startup). The Worker profile is read-only for HR-managed identity, skill, shift and pay configuration. Workers can check in/out for their configured active default shift, and can see only their own attendance, wage records and submitted production logs. Optional roll records are created with a production log and start in the database's `PENDING_QC` state.
+
+The local demo account seed is opt-in and does not change existing credentials:
+
+```powershell
+cd backend
+$env:NODE_ENV = 'development'
+$env:SEED_DEMO_USERS = 'true'
+$env:DEMO_WORKER_WAGE_TYPE = 'DAILY'
+$env:DEMO_WORKER_DAILY_RATE = 'REPLACE_WITH_APPROVED_LOCAL_RATE'
+npm run seed:worker
+```
+
+Choose the wage type and rate approved for your local test database; the seed refuses to guess one. A newly created `worker@gmail.com` account uses temporary password `admin123`, stores only a bcrypt hash, and requires a password change at first sign-in. The account and worker profile are created atomically. Never enable demo seeds in production.
+
+# Dispatch Officer workspace
+
+The Dispatch Officer workspace is available at `/dispatch` after signing in with an active `DISPATCH_OFFICER` account. Its APIs are mounted at `/api/dispatch` and require the dispatch role (or Owner access).
+
+For local development, opt in to the demo account seed from `backend/`:
+
+```powershell
+$env:NODE_ENV = 'development'
+$env:SEED_DEMO_USERS = 'true'
+npm run seed:dispatch
+```
+
+The sample login is `dispatch@gmail.com` with temporary password `admin123`. The seed stores a bcrypt hash and requires a password change at first sign-in. It leaves existing Dispatch Officer accounts unchanged and refuses to alter an account with a different role. Never enable demo seeds in production. You can override the sample email, name, and password with `DEMO_DISPATCH_EMAIL`, `DEMO_DISPATCH_FULL_NAME`, and `DEMO_DISPATCH_PASSWORD`.
+
+# Owner workspace
+
+The Owner workspace uses the shared internal layout at `/owner` and is protected by the active `OWNER` role. Owner APIs are mounted at `/api/owner`; each route also checks its required `auth.role_permissions` permission. Factory-wide dashboard and operational summaries use the existing reporting views and preserve the distinction between supplier invoices awaiting review and approved payables.
+
+The workspace includes the executive dashboard, customers and orders, catalogue/BOM, inventory, suppliers, purchasing, goods receipts, supplier invoice approvals, supplier payments, production, machines, quality, dispatch, customer invoices, finance, workforce, reports, users/roles, audit, notifications and supported settings. Supplier invoice approval is maker-checker controlled, validates its PO/receipt lines, records a required reason and writes the approver into the invoice. Payment creation requires an approved invoice and enforces the remaining balance; confirming a payment and role or setting changes are recorded in the audit log. Settings editing is restricted to supported operational values and validates their ranges.
+
+Migration `013_owner_invoice_reviews.sql` adds the durable invoice review history and database approval guard. It is additive and is applied by backend startup or `npm run db:migrate` from `backend/`. Owner-specific unit tests are in `backend/test/owner-module.test.js`.
+
+# Worker account email
+
+The Supervisor creates worker accounts with a generated temporary password. The password is sent to the worker's required email address and is never returned to the browser. Workers must set a new password at first sign-in. The backend initializes and verifies its pooled Gmail SMTP transport at startup.
+
+Configure `GMAIL` with the sender Gmail address and `APP_PASSWORD` with a Google App Password in `backend/.env`. App Passwords may be pasted with spaces. Keep `backend/.env` private and use `backend/.env.example` only as a variable template. If SMTP is not available, account creation is rolled back and the Supervisor sees a sanitized delivery error.
